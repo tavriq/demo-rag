@@ -258,9 +258,9 @@ docker compose -p demo-rag up -d --build
 - порт — только `127.0.0.1:18101`;
 - ключ — в `.env` с правами 600 (раздел «Свой ключ API»).
 
-## Перед публикацией
+## Публикация
 
-Сейчас демо наружу не открыто. Если открывать:
+Демо открыто на https://rag.tavriq.ru: nginx с TLS перед контейнером, `TRUSTED_PROXY` задан, лимит 10 вопросов в час с адреса проверен снаружи. Что нужно при своей публикации:
 
 - `TRUSTED_PROXY` — адрес, с которого прокси приходит в контейнер. При порте на `127.0.0.1` хоста это шлюз docker-сети проекта: `docker network inspect demo-rag_default --format '{{(index .IPAM.Config 0).Gateway}}'`. Без этой настройки все посетители придут с одного адреса и попадут в один лимит; `/api/health` тогда показывает `proxy_headers_ignored: true`.
 - За Tailscale Funnel или `tailscale serve` нужен тот же `TRUSTED_PROXY`: tailscaled подключается к `127.0.0.1:18101` как обычный процесс хоста. Funnel ставит `X-Forwarded-For` с публичным IP клиента и перезаписывает заголовок, а не дописывает, поэтому подделать цепочку клиент не может. Источник — функция `addProxyForwardedHeaders` в коде tailscale: [`ipn/ipnlocal/serve.go`, строки 1088–1096](https://github.com/tailscale/tailscale/blob/9128778b6515f32e13d92e7380044fe025f9b08e/ipn/ipnlocal/serve.go#L1088-L1096) (`Header.Set("X-Forwarded-For", c.SrcAddr.Addr().String())`; для Funnel адрес клиента приходит от ingress-узла Tailscale в заголовке `Tailscale-Ingress-Src`). Признак запроса из интернета — заголовок `Tailscale-Funnel-Request: ?1`.
