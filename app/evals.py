@@ -31,6 +31,8 @@ from app.embeddings import HashEmbedder, make_embedder
 from app.examples import SPOT_CHECKS_PATH, load_spot_checks
 from app.fmt import dec, num, pct, plural_ru
 from app.index import Index
+from app.checks import check_answer
+from app.context import CONTEXT_MAX_CHARS, FULL_ARTICLE_CHARS, ArticleStore
 from app.llm import SYSTEM_PROMPT, Generator, LLMError, build_user_message, gateway_host, make_generator
 from app.metrics import all_found, first_relevant_rank, is_negative, percentile, rate, retrieval_summary
 from app.pricing import Prices, estimate_input_tokens, estimate_max_tokens
@@ -194,10 +196,17 @@ def run_answers(
     top_k: int,
     max_run_tokens: int,
     prices: Prices | None = None,
+    context_max_chars: int = CONTEXT_MAX_CHARS,
+    full_article_chars: int = FULL_ARTICLE_CHARS,
 ) -> dict:
-    """Ask the model every question; stop before a call whose worst case would cross ``max_run_tokens``."""
+    """Ask the model every question; stop before a call whose worst case would cross ``max_run_tokens``.
+
+    The model gets the same context as on the page (app/context.py) and the answer goes
+    through the same code checks (app/checks.py).
+    """
     prices = prices or Prices()
     article_to_doc = retriever.index.article_to_doc_id()
+    store = ArticleStore(retriever.index.chunks)
     rows = []
     errors: list[dict] = []
     total_tokens = 0
@@ -205,19 +214,21 @@ def run_answers(
     max_tokens = getattr(generator, "max_tokens", 0)
     for item in items:
         hits = retriever.search(item["q"], top_k=top_k)
-        prompt_chars = len(SYSTEM_PROMPT) + len(build_user_message(item["q"], hits))
+        context = store.build_context(hits, context_max_chars, full_article_chars)
+        prompt_chars = len(SYSTEM_PROMPT) + len(build_user_message(item["q"], context))
         if total_tokens + estimate_max_tokens(prompt_chars, max_tokens) > max_run_tokens:
             status, reason = "partial", f"остановлено по лимиту {max_run_tokens} токенов на прогон"
             break
-        retrieved_ids = {h.chunk.doc_id for h in hits}
+        retrieved_ids = {a.doc_id for a in context}
         try:
-            answer = generator.generate(item["q"], hits)
+            answer = generator.generate(item["q"], context)
         except LLMError as exc:
             errors.append({"q": item["q"], "error": type(exc).__name__, "status": getattr(exc, "status_code", None)})
             continue
         usage = answer.usage
         total_tokens += usage.total if usage else 0
         cited_ids = [article_to_doc.get(a, f"?{a}") for a in answer.citations]
+        text, checks = check_answer(answer.text, context)
         rows.append(
             {
                 "q": item["q"],
@@ -237,6 +248,12 @@ def run_answers(
                 "reasoning_tokens": usage.reasoning_tokens if usage else None,
                 "estimated_input_tokens": estimate_input_tokens(prompt_chars),
                 "latency_s": round(answer.latency_s, 3),
+                "context_articles": [a.article for a in context],
+                "context_chars": sum(len(a.text) for a in context),
+                "answer_words": len(text.split()),
+                "removed_citations": checks.removed,
+                "numbers_total": checks.numbers_total,
+                "numbers_missing": checks.numbers_missing,
                 "answer": answer.text,
             }
         )
@@ -255,6 +272,8 @@ def run_answers(
     total_in = sum(r["input_tokens"] or 0 for r in rows)
     total_out = sum(r["output_tokens"] or 0 for r in rows)
     ratios = [r["input_tokens"] / r["estimated_input_tokens"] for r in with_usage]
+    numbers_total = sum(r["numbers_total"] for r in answered)
+    numbers_missing = sum(len(r["numbers_missing"]) for r in answered)
     return {
         "status": status,
         "reason": reason,
@@ -275,6 +294,14 @@ def run_answers(
         "uncited_answer_rate": rate([not r["cited_ids"] for r in answered]),
         "n_answered": len(answered),
         "incomplete_rate": rate([not r["complete"] for r in rows]),
+        "context_max_chars": context_max_chars,
+        "full_article_chars": full_article_chars,
+        "avg_context_chars": sum(r["context_chars"] for r in rows) / len(rows) if rows else None,
+        "avg_answer_words": sum(r["answer_words"] for r in answered) / len(answered) if answered else None,
+        # code checks (app/checks.py) on answers that are not refusals
+        "removed_citation_rate": rate([bool(r["removed_citations"]) for r in answered]),
+        "numbers_total": numbers_total,
+        "numbers_verified_rate": (numbers_total - numbers_missing) / numbers_total if numbers_total else None,
         "total_tokens": total_in + total_out,
         "avg_input_tokens": avg("input_tokens"),
         "avg_output_tokens": avg("output_tokens"),
@@ -434,8 +461,16 @@ def answer_summary_lines(a: dict) -> list[str]:
         f"(n={a['n_negative']})",
         f"- Ответы без единой ссылки на статью (отказы не считаются): {pct(a['uncited_answer_rate'])} "
         f"(n={a['n_answered']})",
-        f"- Все ссылки ведут на фрагменты, которые модель получила: {pct(a['citation_valid_rate'])}",
+        f"- Все ссылки ведут на статьи, которые модель получила: {pct(a['citation_valid_rate'])}",
         f"- Ответ оборван лимитом длины или пуст: {pct(a['incomplete_rate'])}",
+    ] + ([
+        f"- Контекст: статья целиком до {a['full_article_chars']} символов, длинная — найденные части ±1, "
+        f"всего до {a['context_max_chars']}; в среднем {_tok(a['avg_context_chars'])} символов на вопрос",
+        f"- Длина ответа в среднем: {_tok(a['avg_answer_words'])} слов (отказы не считаются)",
+        f"- Числа в ответах найдены в тексте процитированных статей: {pct(a['numbers_verified_rate'])} "
+        f"(чисел {a['numbers_total']})",
+        f"- Ответы, где код убрал ссылку на непрочитанную статью: {pct(a['removed_citation_rate'])}",
+    ] if "avg_answer_words" in a else []) + [
         f"- Токены на ответ в среднем: вход {_tok(a['avg_input_tokens'])}, выход {_tok(a['avg_output_tokens'])}, "
         f"из них рассуждения {_tok(a['avg_reasoning_tokens'])}. Всего за прогон {_tok(a['total_tokens'])}{rub}.",
         f"- Задержка ответа модели: p50 {_sec(a['p50_latency_s'])}, p95 {_sec(a['p95_latency_s'])}, "
@@ -497,6 +532,8 @@ def run(
     spot_checks: list[dict] | None = None,
     prices: Prices | None = None,
     gateway: str | None = None,
+    context_max_chars: int = CONTEXT_MAX_CHARS,
+    full_article_chars: int = FULL_ARTICLE_CHARS,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     meta = retriever.index.meta
@@ -532,6 +569,8 @@ def run(
             "dense_weight": retriever.dense_weight,
             "search_mode": retriever.mode,
             "article_router": retriever.article_router,
+            "context_max_chars": context_max_chars,
+            "full_article_chars": full_article_chars,
         },
         "runtime": runtime_info(),
         "retrieval": run_retrieval(retriever, items, top_k=top_k),
@@ -542,7 +581,9 @@ def run(
     elif generator is None:
         report["answers"] = {"status": "not_run", "reason": "нужны LLM_API_KEY и LLM_BASE_URL"}
     else:
-        report["answers"] = run_answers(retriever, generator, items, top_k, max_run_tokens, prices)
+        report["answers"] = run_answers(
+            retriever, generator, items, top_k, max_run_tokens, prices, context_max_chars, full_article_chars
+        )
         report["answers"]["gateway"] = gateway
     return report
 
@@ -603,6 +644,8 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         spot_checks=load_spot_checks(args.spot_checks),
         prices=Prices(settings.price_rub_per_1m_input, settings.price_rub_per_1m_output),
+        context_max_chars=settings.context_max_chars,
+        full_article_chars=settings.full_article_chars,
         gateway=gateway_host() if generator is not None else None,
     )
     for path in write_report(report, args.out, update_latest=not args.no_latest):

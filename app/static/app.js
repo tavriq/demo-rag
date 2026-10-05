@@ -1,7 +1,8 @@
 "use strict";
 
-// Fragment and question text is inserted with textContent only.
-// The answer arrives as server-escaped HTML (app/render.py) and is the only innerHTML use.
+// Question, fragment and article text is inserted with textContent only.
+// The final answer arrives as server-escaped HTML (app/render.py) and is the only innerHTML use;
+// while it streams, the raw text goes in with textContent.
 
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -9,6 +10,9 @@
   const input = $("question");
   const button = $("ask-button");
   let maxChars = 500;
+  let articlesByNumber = {};
+  let fragmentByArticle = {};
+  let lastAnswer = null;
 
   function fmtInt(value) {
     return Number(value || 0).toLocaleString("ru-RU");
@@ -16,6 +20,13 @@
 
   function fmtRub(value) {
     return "≈ " + Number(value).toLocaleString("ru-RU", { maximumFractionDigits: 2 }) + " ₽";
+  }
+
+  function plural(n, one, few, many) {
+    const m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+    return many;
   }
 
   function setBudget(budget) {
@@ -39,6 +50,36 @@
     return node;
   }
 
+  // ---- progress steps -------------------------------------------------------
+
+  const STEP_ORDER = ["search", "read", "write", "check"];
+
+  function setStep(name, label) {
+    const steps = $("steps");
+    steps.hidden = false;
+    const at = STEP_ORDER.indexOf(name);
+    for (const li of steps.children) {
+      const i = STEP_ORDER.indexOf(li.dataset.step);
+      li.className = i < at ? "done" : i === at ? "active" : "";
+    }
+    if (label) steps.querySelector('[data-step="' + name + '"]').textContent = label;
+  }
+
+  function finishSteps() {
+    for (const li of $("steps").children) li.className = "done";
+  }
+
+  function resetSteps() {
+    const labels = { search: "Поиск по кодексу", read: "Модель читает статьи", write: "Пишет ответ",
+                     check: "Код проверяет ссылки и числа" };
+    for (const li of $("steps").children) {
+      li.className = "";
+      li.textContent = labels[li.dataset.step];
+    }
+  }
+
+  // ---- fragments and articles -------------------------------------------------
+
   function rankText(f) {
     if (f.pinned) return "найдено по номеру статьи в вопросе";
     const parts = [];
@@ -51,7 +92,9 @@
   function renderFragments(fragments) {
     const box = $("fragments");
     box.replaceChildren();
+    fragmentByArticle = {};
     for (const f of fragments || []) {
+      if (!fragmentByArticle[f.article]) fragmentByArticle[f.article] = f;
       const details = el("details", "fragment");
       details.id = f.anchor;
       const summary = el("summary");
@@ -74,10 +117,66 @@
     $("fragments-block").hidden = !(fragments && fragments.length);
   }
 
+  function shortTitle(a) {
+    return (a.header || "").replace(/^Статья\s+[\d.\-]+\.\s*/, "");
+  }
+
+  function citeLink(a) {
+    const link = el("a", "cite", "ст. " + a.article);
+    link.dataset.article = a.article;
+    if (a.anchor) link.dataset.anchor = a.anchor;
+    link.href = a.source_url || (a.anchor ? "#" + a.anchor : "#");
+    if (a.source_url) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+    return link;
+  }
+
+  function renderArticles(articles, cited) {
+    const list = $("articles");
+    list.replaceChildren();
+    articlesByNumber = {};
+    const citedSet = new Set(cited || []);
+    for (const a of articles || []) {
+      articlesByNumber[a.article] = a;
+      const li = el("li", citedSet.has(a.article) ? "art cited" : "art");
+      li.append(citeLink(a), el("span", "art-title", shortTitle(a)), el("span", "muted", a.coverage));
+      if (citedSet.has(a.article)) li.append(el("span", "badge", "в ответе"));
+      list.append(li);
+    }
+    $("articles-block").hidden = !(articles && articles.length);
+  }
+
+  // ---- answer ---------------------------------------------------------------
+
   function showNotice(text) {
     const notice = $("notice");
     notice.textContent = text || "";
     notice.hidden = !text;
+  }
+
+  function checksText(answer) {
+    const c = answer.checks || {};
+    if (answer.no_answer || !c.citations_total) return "";
+    const parts = [];
+    if (c.removed && c.removed.length) {
+      parts.push("убрано " + c.removed.length + " " + plural(c.removed.length, "ссылка", "ссылки", "ссылок") +
+        " на статьи, которых модель не читала (ст. " + c.removed.join(", ст. ") + ")");
+    } else {
+      parts.push(c.citations_total + " " + plural(c.citations_total, "ссылка", "ссылки", "ссылок") +
+        " — все на прочитанные статьи");
+    }
+    if (c.numbers_total) {
+      if (c.numbers_missing && c.numbers_missing.length) {
+        parts.push("чисел найдено в тексте статей " + c.numbers_found + " из " + c.numbers_total +
+          ", не найдены подчёркнуты: " + c.numbers_missing.join(", "));
+      } else {
+        parts.push(c.numbers_total === 1 ? "число есть в тексте статьи"
+          : "все " + c.numbers_total + " " + plural(c.numbers_total, "число", "числа", "чисел") + " есть в тексте статей");
+      }
+    }
+    return "Проверено кодом: " + parts.join(" · ");
   }
 
   function renderAnswer(data) {
@@ -86,7 +185,14 @@
       block.hidden = true;
       return;
     }
-    $("answer").innerHTML = data.answer.html; // escaped on the server
+    lastAnswer = data.answer;
+    const box = $("answer");
+    box.classList.remove("streaming");
+    box.innerHTML = data.answer.html; // escaped on the server
+    const checks = checksText(data.answer);
+    $("answer-checks").textContent = checks;
+    $("answer-checks").hidden = !checks;
+    $("copy-button").hidden = data.answer.no_answer;
     const meta = [];
     if (data.mode === "live" && data.cached) {
       meta.push("модель " + data.model);
@@ -105,38 +211,229 @@
     block.hidden = false;
   }
 
-  async function ask(question) {
-    button.disabled = true;
-    button.textContent = "Ищу…";
-    $("result").hidden = false;
-    showNotice("");
-    try {
-      const resp = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: question }),
-      });
+  function startStreamingAnswer() {
+    const box = $("answer");
+    box.classList.add("streaming");
+    box.textContent = "";
+    $("answer-checks").hidden = true;
+    $("copy-button").hidden = true;
+    $("answer-meta").textContent = "";
+    $("answer-block").hidden = false;
+  }
+
+  function onMeta(meta) {
+    renderArticles(meta.articles, []);
+    renderFragments(meta.fragments);
+    const n = (meta.articles || []).length;
+    if (meta.cached) {
+      setStep("read", "Статей в ответе: " + n);
+      setStep("write", "Ответ из кэша, токены не тратятся");
+      setStep("check", "Проверки сохранены с первого ответа");
+    } else setStep("read", n ? "Модель читает " + n + " " + plural(n, "статью", "статьи", "статей") : "Статей не найдено");
+  }
+
+  function onDone(data) {
+    finishSteps();
+    if (data.truncated) showNotice("Вопрос обрезан до " + data.max_question_chars + " символов.");
+    setBudget(data.budget);
+    renderAnswer(data);
+    renderArticles(data.articles, (data.answer && data.answer.citations || []).map((c) => c.article));
+    renderFragments(data.fragments);
+  }
+
+  function onError(data, status) {
+    $("steps").hidden = true;
+    setBudget(data.budget);
+    const msg = data.message ||
+      (status === 422 || status === 413 ? "Вопрос слишком длинный." : "Ошибка " + status);
+    showNotice(msg);
+    $("answer-block").hidden = true;
+    renderArticles(data.articles || [], []);
+    renderFragments(data.fragments || []);
+  }
+
+  // ---- requests -------------------------------------------------------------
+
+  async function readEvents(resp, handlers) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        let name = "message", data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) name = line.slice(7);
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (handlers[name]) handlers[name](JSON.parse(data));
+      }
+    }
+  }
+
+  async function askStream(question) {
+    const resp = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question }),
+    });
+    if (!resp.ok || !resp.body || !resp.body.getReader) {
       let data = {};
       try { data = await resp.json(); } catch (_) { data = {}; }
-      setBudget(data.budget);
-      if (!resp.ok) {
-        const msg = data.message ||
-          (resp.status === 422 || resp.status === 413 ? "Вопрос слишком длинный." : "Ошибка " + resp.status);
-        showNotice(msg);
-        $("answer-block").hidden = true;
-        renderFragments(data.fragments || []);
-        return;
-      }
-      if (data.truncated) showNotice("Вопрос обрезан до " + data.max_question_chars + " символов.");
-      renderAnswer(data);
-      renderFragments(data.fragments);
+      if (resp.ok) return askJson(question); // no stream support: ask again as JSON (free from the cache)
+      onError(data, resp.status);
+      return;
+    }
+    let writing = false;
+    let finished = false;
+    await readEvents(resp, {
+      meta: onMeta,
+      delta: (d) => {
+        if (!writing) {
+          writing = true;
+          setStep("write", "Пишет ответ");
+          startStreamingAnswer();
+        }
+        $("answer").textContent += d.t;
+      },
+      done: (data) => { finished = true; setStep("check"); onDone(data); },
+      error: (data) => { finished = true; onError(data, data.status); },
+    });
+    if (!finished) showNotice("Соединение оборвалось, попробуйте ещё раз.");
+  }
+
+  async function askJson(question) {
+    const resp = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question }),
+    });
+    let data = {};
+    try { data = await resp.json(); } catch (_) { data = {}; }
+    if (!resp.ok) onError(data, resp.status);
+    else onDone(data);
+  }
+
+  async function ask(question) {
+    button.disabled = true;
+    button.textContent = "Думаю…";
+    closeCard();
+    $("result").hidden = false;
+    showNotice("");
+    resetSteps();
+    setStep("search");
+    // on a phone the examples push the result below the fold: bring the progress into view
+    if (!window.matchMedia("(min-width: 640px)").matches) $("steps").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("answer-block").hidden = true;
+    $("articles-block").hidden = true;
+    $("fragments-block").hidden = true;
+    try {
+      if (window.TextDecoder && window.ReadableStream) await askStream(question);
+      else await askJson(question);
     } catch (err) {
+      $("steps").hidden = true;
       showNotice("Сервер недоступен, попробуйте позже.");
     } finally {
       button.disabled = false;
       button.textContent = "Спросить";
     }
   }
+
+  // ---- citation card ----------------------------------------------------------
+
+  const card = $("cite-card");
+
+  function closeCard() {
+    card.hidden = true;
+  }
+
+  function openCard(link) {
+    const a = articlesByNumber[link.dataset.article];
+    if (!a) return false;
+    const frag = fragmentByArticle[a.article];
+    $("cite-title").textContent = a.header;
+    $("cite-chapter").textContent = a.chapter || "";
+    let quote = frag ? frag.text : "";
+    // a fragment of a long article can start mid-sentence: start from its next paragraph
+    const nl = quote.indexOf("\n");
+    if (/^[a-zа-яё]/.test(quote) && nl > 0 && nl < quote.length - 40) quote = "… " + quote.slice(nl + 1);
+    if (quote.length > 420) quote = quote.slice(0, 420).replace(/\s+\S*$/, "") + " …";
+    $("cite-quote").textContent = quote;
+    $("cite-quote").hidden = !quote;
+    $("cite-coverage").textContent = "Модель прочитала: " + a.coverage +
+      (a.edition_date ? " · редакция " + a.edition_date : "");
+    const source = $("cite-source");
+    source.hidden = !a.source_url;
+    if (a.source_url) source.href = a.source_url;
+    const toFragment = $("cite-fragment");
+    toFragment.hidden = !(frag && frag.anchor);
+    if (frag) toFragment.dataset.anchor = frag.anchor;
+    card.hidden = false;
+    if (window.matchMedia("(min-width: 640px)").matches) {
+      const r = link.getBoundingClientRect();
+      const width = card.offsetWidth;
+      const left = Math.min(Math.max(8, r.left + window.scrollX), window.scrollX + document.documentElement.clientWidth - width - 8);
+      card.style.left = left + "px";
+      card.style.top = (r.bottom + window.scrollY + 6) + "px";
+      card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } else {
+      card.style.left = "";
+      card.style.top = "";
+    }
+    source.focus({ preventScroll: true });
+    return true;
+  }
+
+  function onCiteClick(event) {
+    const link = event.target.closest("a.cite");
+    if (!link) return;
+    if (openCard(link)) event.preventDefault();
+  }
+
+  $("answer").addEventListener("click", onCiteClick);
+  $("articles").addEventListener("click", onCiteClick);
+  $("cite-close").addEventListener("click", closeCard);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeCard(); });
+  document.addEventListener("click", (event) => {
+    if (!card.hidden && !card.contains(event.target) && !event.target.closest("a.cite")) closeCard();
+  });
+  $("cite-fragment").addEventListener("click", (event) => {
+    event.preventDefault();
+    closeCard();
+    const target = document.getElementById(event.currentTarget.dataset.anchor);
+    if (!target) return;
+    target.open = true;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.add("flash");
+    setTimeout(() => target.classList.remove("flash"), 1200);
+  });
+
+  // ---- copy -----------------------------------------------------------------
+
+  $("copy-button").addEventListener("click", async () => {
+    if (!lastAnswer) return;
+    const lines = [lastAnswer.text];
+    const cited = (lastAnswer.citations || []).filter((c) => c.found && c.source_url);
+    if (cited.length) {
+      lines.push("", "Статьи:");
+      for (const c of cited) lines.push("ст. " + c.article + " ТК РФ — " + c.source_url);
+    }
+    const btn = $("copy-button");
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      btn.textContent = "Скопировано";
+    } catch (_) {
+      btn.textContent = "Не удалось";
+    }
+    setTimeout(() => { btn.textContent = "Скопировать"; }, 1500);
+  });
+
+  // ---- form -----------------------------------------------------------------
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -160,18 +457,6 @@
     input.value = chip.textContent;
     updateCount();
     form.requestSubmit();
-  });
-
-  $("answer").addEventListener("click", (event) => {
-    const link = event.target.closest("a.cite");
-    if (!link) return;
-    event.preventDefault();
-    const target = document.getElementById(link.dataset.anchor);
-    if (!target) return;
-    target.open = true;
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
-    target.classList.add("flash");
-    setTimeout(() => target.classList.remove("flash"), 1200);
   });
 
   fetch("/api/health")

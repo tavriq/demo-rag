@@ -1,28 +1,58 @@
 from app.render import anchor_for, render_answer_html, render_evals_page
 
+A80 = {"80": {"header": "Статья 80. Расторжение трудового договора по инициативе работника",
+              "source_url": "https://www.consultant.ru/document/cons_doc_LAW_34683/abc/", "anchor": "frag-TK-80-0"}}
+
 
 def test_model_html_is_escaped():
-    out = render_answer_html('<script>alert(1)</script><img src=x onerror="x()"> [ст. 80]', {"80": "frag-TK-80-0"})
+    out = render_answer_html('<script>alert(1)</script><img src=x onerror="x()"> [ст. 80]', A80)
     assert "<script>" not in out and "<img" not in out
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
-    assert '<a class="cite" href="#frag-TK-80-0" data-anchor="frag-TK-80-0">80</a>' in out
+    assert 'class="cite" data-article="80" data-anchor="frag-TK-80-0"' in out
+    assert 'href="https://www.consultant.ru/document/cons_doc_LAW_34683/abc/" target="_blank"' in out
+    assert ">ст.&nbsp;80</a>" in out
 
 
-def test_citations_link_only_to_retrieved_fragments():
-    out = render_answer_html("Норма [ст. 115], выдумка [ст. 999].", {"115": "frag-TK-115-0"})
-    assert 'href="#frag-TK-115-0"' in out
-    assert 'class="cite cite-missing"' in out and ">999</span>" in out
-    assert "#frag-TK-999" not in out
+def test_citations_link_only_to_read_articles():
+    out = render_answer_html("Норма [ст. 80], выдумка [ст. 999].", A80)
+    assert 'data-article="80"' in out
+    assert 'class="cite cite-missing"' in out and "ст. 999</span>" in out
+    assert 'data-article="999"' not in out
+
+
+def test_citation_without_source_url_links_to_fragment():
+    out = render_answer_html("Норма [ст. 80].", {"80": {"header": "Статья 80", "source_url": "", "anchor": "frag-TK-80-0"}})
+    assert 'href="#frag-TK-80-0"' in out and "target=" not in out
 
 
 def test_injection_inside_citation_brackets_is_inert():
-    out = render_answer_html('[ст. 80 "><script>x</script>]', {"80": "frag-TK-80-0"})
-    assert "<script>" not in out
-    assert "&lt;script&gt;" in out
+    out = render_answer_html('[ст. 80 "><script>x</script>]', A80)
+    # only the article number survives: the rest of the bracket is dropped, never echoed
+    assert "<script>" not in out and "script" not in out
+    assert 'data-article="80"' in out
 
 
-def test_newlines_become_breaks_and_quotes_survive():
-    assert render_answer_html("a\nb 'c' \"d\"", {}) == "a<br>b 'c' \"d\""
+def test_sections_lists_and_disclaimer():
+    text = ("Коротко: можно [ст. 80].\nПодробно:\n- первое [ст. 80]\n- второе 'в кавычках' \"x\"\n"
+            "Исключения и сроки:\n- за 14 дней [ст. 80]\nЭто не юридическая консультация.")
+    out = render_answer_html(text, A80)
+    assert out.count('<h3 class="ans-h">') == 3 and "<h3 class=\"ans-h\">Исключения и сроки</h3>" in out
+    assert out.count("<ul>") == 2 and out.count("<li>") == 3
+    assert "второе 'в кавычках' \"x\"" in out
+    assert '<p class="disclaimer">Это не юридическая консультация.</p>' in out
+
+
+def test_unverified_numbers_are_marked_on_their_line_only():
+    text = "- за 99 дней [ст. 80]\n- за 99 рублей и 14 дней, ст. 81 [ст. 80]"
+    out = render_answer_html(text, A80, {"0": ["99"]})
+    first, second = out.split("</li>")[:2]
+    assert '<span class="num-unverified"' in first and ">99</span>" in first
+    assert "num-unverified" not in second
+
+
+def test_article_reference_numbers_are_not_marked():
+    out = render_answer_html("по ст. 81 и статье 99 [ст. 80]", A80, {"0": ["81", "99"]})
+    assert "num-unverified" not in out
 
 
 def test_anchor_is_safe_identifier():

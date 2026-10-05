@@ -253,7 +253,7 @@ def test_repeated_question_is_answered_from_cache_for_free(make_client, fake_llm
 
 def test_cached_answer_is_served_when_budget_is_exhausted(make_client, fake_llm_factory):
     gen, _ = fake_llm_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
-    client = make_client(generator=gen, daily_token_budget=9000, rate_limit_per_hour=100)
+    client = make_client(generator=gen, daily_token_budget=15000, rate_limit_per_hour=100)
     assert client.post("/api/ask", json={"question": "Сколько дней отпуск?"}).status_code == 200
     statuses = [client.post("/api/ask", json={"question": f"вопрос {i}"}).status_code for i in range(5)]
     assert statuses[-1] == 429
@@ -262,9 +262,9 @@ def test_cached_answer_is_served_when_budget_is_exhausted(make_client, fake_llm_
 
 
 def test_hourly_token_budget_applies_across_clients(settings, retriever, clock, fake_llm_factory):
-    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=5000, output_tokens=100)
     s = replace(settings, trusted_proxies=parse_trusted_proxies("10.0.0.1"), rate_limit_per_hour=100)
-    guard = CostGuard(s.guard_db, 10**9, 100, clock=clock, hourly_token_budget=6000)
+    guard = CostGuard(s.guard_db, 10**9, 100, clock=clock, hourly_token_budget=20000)
     app = create_app(settings=s, retriever=retriever, generator=gen, guard=guard)
     client = TestClient(app, client=("10.0.0.1", 50000))  # the trusted proxy
     codes = []
@@ -312,3 +312,60 @@ def test_forwarded_for_without_trusted_proxy_is_flagged(make_client):
     assert client.get("/api/health").json()["proxy_headers_ignored"] is False
     client.post("/api/ask", json={"question": "отпуск"}, headers={"X-Forwarded-For": "1.2.3.4"})
     assert client.get("/api/health").json()["proxy_headers_ignored"] is True
+
+
+def _sse(text: str) -> list[tuple[str, dict]]:
+    events = []
+    for block in text.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.split("\n"))
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def test_live_answer_has_articles_and_checks(make_client, fake_llm_factory):
+    text = "Коротко: увольнение по желанию [ст. 80], предупредить за 2 недели [ст. 80], а не за 30 дней [ст. 80] [ст. 999]."
+    gen, gateway = fake_llm_factory(text=text)
+    data = make_client(generator=gen).post("/api/ask", json={"question": "статья 80"}).json()
+    assert data["articles"][0]["article"] == "80" and data["articles"][0]["coverage"] == "целиком"
+    assert data["articles"][0]["anchor"].startswith("frag-TK-80")
+    checks = data["answer"]["checks"]
+    assert checks["removed"] == ["999"] and checks["numbers_missing"] == ["30"]
+    assert "[ст. 999]" not in data["answer"]["text"]
+    assert 'class="num-unverified"' in data["answer"]["html"]
+    assert data["answer"]["citations"][0]["source_url"].startswith("https://")
+    # the model read whole articles, not 350-character fragments
+    user_msg = gateway.calls[0]["messages"][1]["content"]
+    assert '<article number="80"' in user_msg and "<fragment" not in user_msg
+
+
+def test_stream_endpoint_sends_meta_deltas_and_done(make_client, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Коротко: отпуск 28 календарных дней [ст. 115].", input_tokens=3000,
+                              output_tokens=100)
+    client = make_client(generator=gen)
+    resp = client.post("/api/ask/stream", json={"question": "Сколько дней отпуск?"})
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.headers["x-accel-buffering"] == "no"
+    events = _sse(resp.text)
+    names = [name for name, _ in events]
+    assert names[0] == "meta" and names[-1] == "done" and names.count("delta") > 1
+    assert events[0][1]["articles"]
+    streamed = "".join(data["t"] for name, data in events if name == "delta")
+    done = events[-1][1]
+    assert done["answer"]["text"].startswith(streamed.strip())
+    assert done["tokens"] == 3100 and done["budget"]["tokens_today"] == 3100
+    # the same question again: from the cache, no deltas, still meta + done
+    again = _sse(client.post("/api/ask/stream", json={"question": "Сколько дней отпуск?"}).text)
+    assert [n for n, _ in again] == ["meta", "done"] and again[-1][1]["cached"] is True
+    assert again[-1][1]["articles"] == done["articles"]
+
+
+def test_stream_endpoint_reports_errors_as_events(make_client, fake_llm_factory):
+    gen, _ = fake_llm_factory(status=503)
+    events = _sse(make_client(generator=gen).post("/api/ask/stream", json={"question": "отпуск"}).text)
+    assert events[-1][0] == "error" and events[-1][1]["status"] == 502
+    assert events[-1][1]["articles"]
+    client = make_client(rate_limit_per_hour=1)
+    client.post("/api/ask/stream", json={"question": "отпуск"})
+    limited = _sse(client.post("/api/ask/stream", json={"question": "отпуск 2"}).text)
+    assert limited == [("error", limited[0][1])] and limited[0][1]["status"] == 429
+    assert client.post("/api/ask/stream", json={"question": "   "}).status_code == 400

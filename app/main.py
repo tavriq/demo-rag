@@ -11,22 +11,25 @@ import json
 import logging
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.cache import AnswerCache, fingerprint
+from app.checks import check_answer
 from app.config import Settings
+from app.context import NEIGHBOUR_PARTS, ArticleStore, ContextArticle
 from app.embeddings import make_embedder
 from app.examples import ui_examples
 from app.guard import CostGuard
 from app.index import Index
-from app.llm import SYSTEM_PROMPT, Generator, LLMError, extract_citations, is_no_answer, make_generator
+from app.llm import SYSTEM_PROMPT, Answer, Generator, LLMError, extract_citations, is_no_answer, make_generator
+from app.mcp_server import build_mcp_server, http_security
 from app.netutil import client_ip, rate_limit_key
 from app.pricing import Prices, estimate_max_tokens
 from app.render import anchor_for, render_answer_html, render_evals_page
@@ -126,17 +129,32 @@ def _fragment_json(hit: SearchHit) -> dict:
     }
 
 
-def _answer_json(text: str, stop_reason: str | None, fragments: list[dict]) -> dict:
-    """Answer text + citations linked to the fragments it was generated from."""
-    anchors: dict[str, str] = {}
+def _articles_json(context: list[ContextArticle], fragments: list[dict]) -> list[dict]:
+    """What the model read, with the first retrieved fragment of each article for the page."""
+    first_anchor: dict[str, str] = {}
     for fragment in fragments:
-        anchors.setdefault(fragment["article"], fragment["anchor"])
+        first_anchor.setdefault(fragment["article"], fragment["anchor"])
+    return [{**a.to_json(), "anchor": first_anchor.get(a.article)} for a in context]
+
+
+def _answer_json(text: str, stop_reason: str | None, articles: list[dict], checks: dict | None) -> dict:
+    """Answer text, its HTML, citations linked to the articles the model read, and the code checks."""
+    links = {a["article"]: a for a in articles}
+    checks = checks or {}
     return {
         "text": text,
-        "html": render_answer_html(text, anchors),
+        "html": render_answer_html(text, links, checks.get("missing_by_line")),
         "citations": [
-            {"article": a, "anchor": anchors.get(a), "found": a in anchors} for a in extract_citations(text)
+            {
+                "article": a,
+                "anchor": links.get(a, {}).get("anchor"),
+                "header": links.get(a, {}).get("header"),
+                "source_url": links.get(a, {}).get("source_url"),
+                "found": a in links,
+            }
+            for a in extract_citations(text)
         ],
+        "checks": checks,
         "no_answer": is_no_answer(text),
         "stop_reason": stop_reason,
     }
@@ -186,11 +204,18 @@ def create_app(
         prices=prices,
     )
     cache = cache or AnswerCache(settings.guard_db)
-
-    # Longest fragment as it is sent to the model (+ tag overhead): basis of the worst-case cost estimate.
-    max_fragment_chars = settings.chunk_max_chars + 300
-    if retriever is not None and retriever.index.chunks:
-        max_fragment_chars = max(len(c.display_text) for c in retriever.index.chunks) + 150
+    store = ArticleStore(retriever.index.chunks) if retriever is not None else None
+    # MCP over Streamable HTTP: stateless JSON, so it works behind nginx without sticky sessions.
+    mcp_server = mcp_http = None
+    if store is not None and settings.mcp_enabled:
+        mcp_server = build_mcp_server(retriever, store)
+        mcp_http = mcp_server.streamable_http_app(
+            streamable_http_path="/mcp",
+            stateless_http=True,
+            json_response=True,
+            max_request_body_size=MAX_BODY_BYTES,
+            transport_security=http_security(list(settings.mcp_allowed_hosts)),
+        )
 
     # Everything that changes an answer besides the question and top_k: part of the cache key.
     index_meta = retriever.index.meta if retriever is not None else {}
@@ -210,6 +235,8 @@ def create_app(
             "weights": [settings.bm25_weight, settings.dense_weight],
             "search_mode": settings.search_mode,
             "article_router": settings.article_router,
+            "context": [settings.context_max_chars, settings.full_article_chars, NEIGHBOUR_PARTS],
+            "answer_checks": 1,
         }
     )
     proxy_state = {"forwarded_for_ignored": False}
@@ -220,7 +247,10 @@ def create_app(
             thread = threading.Thread(target=warm_up_cache, name="cache-warm-up", daemon=True)
             app.state.warmup_thread = thread
             thread.start()
-        yield
+        async with AsyncExitStack() as stack:
+            if mcp_server is not None:
+                await stack.enter_async_context(mcp_server.session_manager.run())
+            yield
 
     app = FastAPI(
         title="RAG по Трудовому кодексу РФ", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
@@ -230,8 +260,11 @@ def create_app(
     app.state.generator = generator
     app.state.guard = guard
     app.state.cache = cache
+    app.state.store = store
     app.state.warmup_thread = None
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    if mcp_http is not None:
+        app.router.routes.extend(mcp_http.routes)  # the /mcp endpoint; its session manager runs in lifespan
     app.add_middleware(BodySizeLimit, max_bytes=MAX_BODY_BYTES)
 
     @app.middleware("http")
@@ -245,16 +278,27 @@ def create_app(
         return min(requested or settings.top_k, settings.max_top_k)
 
     def _estimate(question: str, top_k: int) -> int:
-        # Upper bound before retrieval: top_k longest fragments + escaped question + system prompt
-        # + the full completion limit.
-        prompt_chars = len(SYSTEM_PROMPT) + len(html.escape(question)) + 100 + top_k * max_fragment_chars
+        # Upper bound before retrieval: the whole context budget (+ tags and a few […] marks per
+        # article) + escaped question + system prompt + the full completion limit.
+        prompt_chars = (
+            len(SYSTEM_PROMPT) + len(html.escape(question)) + 100 + settings.context_max_chars + top_k * 300
+        )
         return estimate_max_tokens(prompt_chars, settings.max_tokens)
 
     def answer_question(
         question: str, top_k: int, client_key: str | None, truncated: bool = False
     ) -> tuple[int, dict, dict | None]:
-        """Cost guard, cache, retrieval and generation. Returns (status, body, headers).
+        """Non-streaming answer: (status, body, headers)."""
+        for name, data in answer_events(question, top_k, client_key, truncated, stream=False):
+            if name == "result":
+                return data
+        raise RuntimeError("answer_events ended without a result")
 
+    def answer_events(question: str, top_k: int, client_key: str | None, truncated: bool = False, stream: bool = False):
+        """Cost guard, cache, retrieval, context and generation as a sequence of events.
+
+        Yields ("meta", {...}) once the articles are known, ("delta", text) while a streamed
+        answer arrives, and always ends with ("result", (status, body, headers)).
         ``client_key`` None skips the per-client rate limit (cache warm-up at start).
         """
         started = time.perf_counter()
@@ -267,35 +311,52 @@ def create_app(
         if not decision.allowed and decision.code == "rate_limited":
             headers = {"Retry-After": str(decision.retry_after_s)} if decision.retry_after_s else None
             body = {"error": decision.code, "message": decision.message, "budget": guard.status()}
-            return 429, body, headers
+            yield "result", (429, body, headers)
+            return
 
         if cached is not None:  # a repeated question: free, no model call, no reservation
-            return 200, {
+            articles = cached.get("articles") or []
+            yield "meta", {"articles": articles, "fragments": cached["fragments"], "cached": True}
+            yield "result", (200, {
                 **base,
                 "mode": "live",
                 "model": cached.get("model"),
                 "cached": True,
                 "cached_at": cached.get("created_at"),
-                "answer": _answer_json(cached["text"], cached.get("stop_reason"), cached["fragments"]),
+                "answer": _answer_json(cached["text"], cached.get("stop_reason"), articles, cached.get("checks")),
+                "articles": articles,
                 "fragments": cached["fragments"],
                 "usage": None,
                 "tokens": 0,
                 "cost_rub": None,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "budget": guard.status(),
-            }, None
+            }, None)
+            return
 
         hits = retriever.search(question, top_k=top_k)
         fragments = [_fragment_json(h) for h in hits]
+        context = store.build_context(hits, settings.context_max_chars, settings.full_article_chars)
+        articles = _articles_json(context, fragments)
 
         if not decision.allowed:  # budget or global hourly cap: polite refusal, fragments still shown
             headers = {"Retry-After": str(decision.retry_after_s)} if decision.retry_after_s else None
             body = {**base, "error": decision.code, "message": decision.message, "fragments": fragments,
-                    "budget": guard.status()}
-            return 429, body, headers
+                    "articles": articles, "budget": guard.status()}
+            yield "result", (429, body, headers)
+            return
 
+        yield "meta", {"articles": articles, "fragments": fragments, "cached": False}
+        answer: Answer | None = None
         try:
-            answer = generator.generate(question, hits)
+            if stream:
+                for item in generator.stream(question, context):
+                    if isinstance(item, str):
+                        yield "delta", item
+                    else:
+                        answer = item
+            else:
+                answer = generator.generate(question, context)
         except LLMError as exc:
             # A rejected request (4xx) is not billed: release the reservation. On 5xx, a connection
             # error or a timeout the request may still have been processed, so the reservation stays.
@@ -305,11 +366,19 @@ def create_app(
             body = {
                 **base,
                 "error": "llm_unavailable",
-                "message": "Модель сейчас недоступна, попробуйте позже. Найденные фрагменты показаны ниже.",
+                "message": "Модель сейчас недоступна, попробуйте позже. Найденные статьи показаны ниже.",
                 "fragments": fragments,
+                "articles": articles,
                 "budget": guard.status(),
             }
-            return 502, body, None
+            yield "result", (502, body, None)
+            return
+        # A client that disconnects mid-stream closes this generator before here: the
+        # worst-case reservation then stays, which only overestimates the spend.
+        if answer is None:
+            raise RuntimeError("generator returned no answer")
+        text, checks = check_answer(answer.text, context)
+        checks_json = checks.to_json()
         usage = answer.usage
         # No usage in the response: the worst-case reservation stays instead of a zero.
         if decision.reservation_id is not None and usage is not None and usage.total > 0:
@@ -318,9 +387,11 @@ def create_app(
             cache.put(
                 cache_key,
                 {
-                    "text": answer.text,
+                    "text": text,
                     "stop_reason": answer.stop_reason,
                     "fragments": fragments,
+                    "articles": articles,
+                    "checks": checks_json,
                     "model": generator.model,
                     "tokens": usage.total if usage else 0,
                     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -328,15 +399,17 @@ def create_app(
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
         log.info(
-            "ask mode=%s hits=%d tokens=%d latency_ms=%d",
-            answer.mode, len(hits), usage.total if usage else 0, latency_ms,
+            "ask mode=%s stream=%s articles=%d context_chars=%d tokens=%d latency_ms=%d",
+            answer.mode, stream, len(context), sum(len(a.text) for a in context),
+            usage.total if usage else 0, latency_ms,
         )
-        return 200, {
+        yield "result", (200, {
             **base,
             "mode": answer.mode,
             "model": generator.model,
             "cached": False,
-            "answer": _answer_json(answer.text, answer.stop_reason, fragments),
+            "answer": _answer_json(text, answer.stop_reason, articles, checks_json),
+            "articles": articles,
             "fragments": fragments,
             "usage": None
             if usage is None
@@ -349,7 +422,7 @@ def create_app(
             "cost_rub": None if usage is None else prices.cost_rub(usage.input_tokens, usage.output_tokens),
             "latency_ms": latency_ms,
             "budget": guard.status(),
-        }, None
+        }, None)
 
     def warm_up_cache() -> None:
         """Answer the example questions once, so clicks on them are free and survive budget exhaustion."""
@@ -377,6 +450,7 @@ def create_app(
             "search_mode": settings.search_mode,
             "article_router": settings.article_router,
             "cached_answers": len(cache),
+            "mcp": "/mcp" if mcp_http is not None else None,
             # True once a request came with X-Forwarded-For while TRUSTED_PROXY is empty: behind a
             # proxy that means every visitor shares one rate-limit bucket.
             "proxy_headers_ignored": proxy_state["forwarded_for_ignored"],
@@ -394,8 +468,8 @@ def create_app(
             body["error"] = "Индекс не загружен: выполните python3 -m app.build_index"
         return body
 
-    @app.post("/api/ask")
-    def ask(payload: AskRequest, request: Request):
+    def _prepare(payload: AskRequest, request: Request) -> tuple[str, bool, str] | JSONResponse:
+        """Normalised question, truncation flag and rate-limit key, or the error response."""
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for and not settings.trusted_proxies and not proxy_state["forwarded_for_ignored"]:
             proxy_state["forwarded_for_ignored"] = True
@@ -415,10 +489,40 @@ def create_app(
                 status_code=503,
                 content={"error": "no_index", "message": "Индекс ещё не построен, попробуйте позже."},
             )
-        status, body, headers = answer_question(question, _top_k(payload.top_k), rate_limit_key(ip), truncated)
+        return question, truncated, rate_limit_key(ip)
+
+    @app.post("/api/ask")
+    def ask(payload: AskRequest, request: Request):
+        prepared = _prepare(payload, request)
+        if isinstance(prepared, JSONResponse):
+            return prepared
+        question, truncated, key = prepared
+        status, body, headers = answer_question(question, _top_k(payload.top_k), key, truncated)
         if status == 200:
             return body
         return JSONResponse(status_code=status, content=body, headers=headers)
+
+    @app.post("/api/ask/stream")
+    def ask_stream(payload: AskRequest, request: Request):
+        """Server-sent events: meta (articles), delta (answer text), then done or error (same body as /api/ask)."""
+        prepared = _prepare(payload, request)
+        if isinstance(prepared, JSONResponse):
+            return prepared
+        question, truncated, key = prepared
+
+        def events():
+            for name, data in answer_events(question, _top_k(payload.top_k), key, truncated, stream=True):
+                if name == "delta":
+                    data = {"t": data}
+                elif name == "result":
+                    status, body, _headers = data
+                    name, data = ("done", body) if status == 200 else ("error", {**body, "status": status})
+                yield f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        # X-Accel-Buffering: nginx would otherwise hold the chunks and send the answer at once.
+        return StreamingResponse(
+            events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
 
     def _latest_evals() -> dict | None:
         path = settings.evals_dir / "latest.json"

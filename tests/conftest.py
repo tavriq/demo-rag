@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from app.chunking import chunk_corpus, load_corpus  # noqa: E402
 from app.config import Settings  # noqa: E402
+from app.context import ArticleStore  # noqa: E402
 from app.embeddings import HashEmbedder  # noqa: E402
 from app.index import Index, build_index  # noqa: E402
 from app.llm import ChatCompletionsGenerator  # noqa: E402
@@ -40,6 +41,21 @@ def index_dir(tmp_path_factory, articles):
 @pytest.fixture(scope="session")
 def retriever(index_dir):
     return Retriever(Index.load(index_dir), HashEmbedder(), candidates=30, rrf_k=60)
+
+
+@pytest.fixture(scope="session")
+def store(retriever):
+    return ArticleStore(retriever.index.chunks)
+
+
+@pytest.fixture
+def ctx(retriever, store):
+    """ctx(query, top_k=5) -> the articles the model would read for this query."""
+
+    def _ctx(query: str, top_k: int = 5):
+        return store.build_context(retriever.search(query, top_k=top_k))
+
+    return _ctx
 
 
 @pytest.fixture
@@ -106,6 +122,8 @@ class FakeGateway:
         self.headers.append(dict(request.headers))
         if self.status != 200:
             return httpx2.Response(self.status, json={"error": {"message": "fail"}})
+        if self.calls[-1].get("stream"):
+            return httpx2.Response(200, content=self.sse_body(), headers={"content-type": "text/event-stream"})
         body = {
             "id": "x",
             "object": "chat.completion",
@@ -124,6 +142,21 @@ class FakeGateway:
                 "prompt_tokens_details": {"cached_tokens": 0},
             }
         return httpx2.Response(200, json=body)
+
+    def sse_body(self) -> bytes:
+        """The same completion as server-sent chunks: text in pieces, finish reason, usage, [DONE]."""
+        text = self.text or ""
+        pieces = [text[i : i + 7] for i in range(0, len(text), 7)]
+        lines = [{"choices": [{"index": 0, "delta": {"content": piece}}]} for piece in pieces]
+        lines.append({"choices": [{"index": 0, "delta": {}, "finish_reason": self.finish_reason}]})
+        if self.usage:
+            lines.append({"choices": [], "usage": {
+                "prompt_tokens": self.input_tokens,
+                "completion_tokens": self.output_tokens,
+                "completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens},
+            }})
+        out = "".join(f"data: {json.dumps(line, ensure_ascii=False)}\n\n" for line in lines) + "data: [DONE]\n\n"
+        return out.encode()
 
     def client(self) -> httpx2.Client:
         return httpx2.Client(

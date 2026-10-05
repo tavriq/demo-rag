@@ -125,7 +125,8 @@ def test_rubles_today_only_with_prices(tmp_path, clock):
 
 def test_token_settings_from_env():
     s = Settings.from_env({})
-    assert s.daily_token_budget == 300_000 and s.hourly_token_budget == 50_000
+    assert s.daily_token_budget == 300_000 and s.hourly_token_budget == 100_000
+    assert s.max_tokens == 1000 and s.context_max_chars == 12000 and s.full_article_chars == 4000
     assert s.price_rub_per_1m_input is None and s.price_rub_per_1m_output is None
     s = Settings.from_env({"DAILY_TOKEN_BUDGET": "1000", "PRICE_RUB_PER_1M_INPUT": "120",
                            "PRICE_RUB_PER_1M_OUTPUT": "480", "LLM_TEMPERATURE": "none",

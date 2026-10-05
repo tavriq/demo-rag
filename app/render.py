@@ -19,29 +19,102 @@ def anchor_for(chunk_id: str) -> str:
     return "frag-" + _ANCHOR_UNSAFE_RE.sub("-", chunk_id)
 
 
-def render_answer_html(text: str, article_anchors: dict[str, str]) -> str:
-    """Escape the answer, then turn [ст. N] into links to the matching fragment.
+_SECTION_RE = re.compile(r"^(Коротко|Подробно|Исключения и сроки)\s*:\s*(.*)$", re.IGNORECASE)
+_BULLET_RE = re.compile(r"^[-•–—*]\s+(.*)$")
+_CLAIM_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_REFERENCE_BEFORE_RE = re.compile(r"(?:\bст\.?|\bстат[а-яё]*|\bглав[а-яё]*|\bфз|№)\s*$", re.IGNORECASE)
 
-    A citation of an article that is not among the retrieved fragments is shown
-    as a highlighted span, not a link: it is a visible signal of a bad citation.
+
+def _mark_numbers(segment: str, missing: set[str]) -> str:
+    """Escape a citation-free piece of text; wrap numbers not found in the cited articles."""
+    if not missing:
+        return html.escape(segment, quote=False)
+    out: list[str] = []
+    pos = 0
+    for m in _CLAIM_NUMBER_RE.finditer(segment):
+        number = m.group(0).replace(",", ".")
+        if number not in missing or _REFERENCE_BEFORE_RE.search(segment[: m.start()]):
+            continue
+        out.append(html.escape(segment[pos : m.start()], quote=False))
+        out.append(
+            '<span class="num-unverified" title="Этого числа нет в тексте статей, на которые ссылается строка">'
+            f"{html.escape(m.group(0), quote=False)}</span>"
+        )
+        pos = m.end()
+    out.append(html.escape(segment[pos:], quote=False))
+    return "".join(out)
+
+
+def _cite_html(number: str, articles: dict[str, dict]) -> str:
+    info = articles.get(number)
+    if not info:
+        return f'<span class="cite cite-missing" title="Этой статьи нет среди прочитанных моделью">ст. {esc(number)}</span>'
+    attrs = f'class="cite" data-article="{esc(number)}"'
+    if info.get("anchor"):
+        attrs += f' data-anchor="{esc(info["anchor"])}"'
+    href = info.get("source_url") or (f"#{info['anchor']}" if info.get("anchor") else "#")
+    external = ' target="_blank" rel="noopener noreferrer"' if info.get("source_url") else ""
+    title = f' title="{esc(info["header"])}"' if info.get("header") else ""
+    return f'<a {attrs} href="{esc(href)}"{external}{title}>ст.&nbsp;{esc(number)}</a>'
+
+
+def _inline(line: str, articles: dict[str, dict], missing: set[str]) -> str:
+    out: list[str] = []
+    pos = 0
+    for m in CITATION_RE.finditer(line):
+        out.append(_mark_numbers(line[pos : m.start()], missing))
+        numbers = ARTICLE_NUMBER_RE.findall(m.group(1))
+        out.append(" ".join(_cite_html(n, articles) for n in numbers) if numbers else html.escape(m.group(0), quote=False))
+        pos = m.end()
+    out.append(_mark_numbers(line[pos:], missing))
+    return "".join(out)
+
+
+def render_answer_html(text: str, articles: dict[str, dict], missing_by_line: dict | None = None) -> str:
+    """Escape the answer and lay it out: sections, bullet lists, citation links.
+
+    ``articles`` maps an article number to {header, source_url, anchor}. A citation of
+    an article the model did not read is shown as a highlighted span, not a link.
+    ``missing_by_line`` ({line index: [numbers]}, from app/checks.py) marks numbers not
+    found in the articles cited on that line.
     """
-    # quote=False: only &, <, > become entities, so no digits appear inside entities
-    escaped = html.escape(text, quote=False)
+    missing_by_line = {int(k): set(v) for k, v in (missing_by_line or {}).items()}
+    out: list[str] = []
+    in_list = False
 
-    def link_numbers(match: re.Match) -> str:
-        inner = match.group(1)
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
 
-        def one(num_match: re.Match) -> str:
-            number = num_match.group(0)
-            anchor = article_anchors.get(number)
-            if anchor:
-                return f'<a class="cite" href="#{esc(anchor)}" data-anchor="{esc(anchor)}">{number}</a>'
-            return f'<span class="cite cite-missing" title="Этой статьи нет среди найденных фрагментов">{number}</span>'
-
-        return "[" + ARTICLE_NUMBER_RE.sub(one, inner) + "]"
-
-    linked = CITATION_RE.sub(link_numbers, escaped)
-    return linked.replace("\n", "<br>")
+    for i, raw in enumerate(text.split("\n")):
+        line = raw.strip()
+        missing = missing_by_line.get(i, set())
+        if not line:
+            close_list()
+            continue
+        section = _SECTION_RE.match(line)
+        if section:
+            close_list()
+            out.append(f'<h3 class="ans-h">{esc(section.group(1).capitalize())}</h3>')
+            rest = section.group(2)
+            if rest:
+                rest = rest[0].upper() + rest[1:]
+                out.append(f"<p>{_inline(rest, articles, missing)}</p>")
+            continue
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_inline(bullet.group(1), articles, missing)}</li>")
+            continue
+        close_list()
+        cls = ' class="disclaimer"' if "не юридическая консультация" in line.lower() else ""
+        out.append(f"<p{cls}>{_inline(line, articles, missing)}</p>")
+    close_list()
+    return "\n".join(out)
 
 
 def _pct(value) -> str:

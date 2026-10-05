@@ -86,6 +86,8 @@ class Settings:
     chunk_max_chars: int
     top_k: int
     max_top_k: int
+    context_max_chars: int
+    full_article_chars: int
     candidates: int
     rrf_k: int
     bm25_weight: float
@@ -105,6 +107,8 @@ class Settings:
     rate_limit_per_hour: int
     warm_cache: bool
     trusted_proxies: tuple[IPv4Network | IPv6Network, ...]
+    mcp_enabled: bool
+    mcp_allowed_hosts: tuple[str, ...]
     has_api_key: bool
 
     @classmethod
@@ -129,8 +133,11 @@ class Settings:
             embedding_model=_get(env, "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
             embed_threads=_get_int(env, "EMBED_THREADS", 2, minimum=1),
             chunk_max_chars=_get_int(env, "CHUNK_MAX_CHARS", 350, minimum=200),
-            top_k=_get_int(env, "TOP_K", 5, minimum=1),
+            top_k=_get_int(env, "TOP_K", 8, minimum=1),
             max_top_k=_get_int(env, "MAX_TOP_K", 8, minimum=1),
+            # The model reads whole articles (short) or windows around the hits (long), app/context.py
+            context_max_chars=_get_int(env, "CONTEXT_MAX_CHARS", 12000, minimum=1000),
+            full_article_chars=_get_int(env, "FULL_ARTICLE_CHARS", 4000, minimum=500),
             candidates=_get_int(env, "RETRIEVAL_CANDIDATES", 30, minimum=1),
             rrf_k=_get_int(env, "RRF_K", 60, minimum=1),
             bm25_weight=_get_float(env, "BM25_WEIGHT", 1.0),
@@ -141,15 +148,21 @@ class Settings:
             llm_reasoning_effort=effort,
             llm_temperature=parse_temperature(_get(env, "LLM_TEMPERATURE", "0")),
             llm_timeout_s=_get_float(env, "LLM_TIMEOUT_S", 30.0, minimum=1.0),
-            max_tokens=_get_int(env, "MAX_TOKENS", 600, minimum=50),
+            max_tokens=_get_int(env, "MAX_TOKENS", 1000, minimum=50),
             max_question_chars=_get_int(env, "MAX_QUESTION_CHARS", 500, minimum=20),
             daily_token_budget=_get_int(env, "DAILY_TOKEN_BUDGET", 300_000),
-            hourly_token_budget=_get_int(env, "HOURLY_TOKEN_BUDGET", 50_000),
+            hourly_token_budget=_get_int(env, "HOURLY_TOKEN_BUDGET", 100_000),
             price_rub_per_1m_input=_get_optional_float(env, "PRICE_RUB_PER_1M_INPUT"),
             price_rub_per_1m_output=_get_optional_float(env, "PRICE_RUB_PER_1M_OUTPUT"),
             rate_limit_per_hour=_get_int(env, "RATE_LIMIT_PER_HOUR", 10, minimum=1),
             warm_cache=_get(env, "WARM_CACHE", "1").lower() not in ("0", "false", "no"),
             trusted_proxies=parse_trusted_proxies(env.get("TRUSTED_PROXY", "")),
+            # MCP over HTTP at /mcp (app/mcp_server.py); Host headers allowed for it, comma-separated
+            mcp_enabled=_get(env, "MCP_HTTP", "1").lower() not in ("0", "false", "no"),
+            mcp_allowed_hosts=tuple(
+                h.strip() for h in _get(env, "MCP_ALLOWED_HOSTS", "127.0.0.1:*,localhost:*,[::1]:*").split(",")
+                if h.strip()
+            ),
             # Live answers need both; with only one of them the app stays in mock mode.
             has_api_key=bool(env.get("LLM_API_KEY", "").strip()) and bool(env.get("LLM_BASE_URL", "").strip()),
         )

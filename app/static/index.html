@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RAG по Трудовому кодексу</title>
-<meta name="description" content="Демо: поиск по Трудовому кодексу РФ и ответы модели со ссылками на статьи.">
+<meta name="description" content="Демо: поиск по Трудовому кодексу РФ и ответы модели со ссылками на статьи, проверенными кодом.">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
@@ -12,14 +12,12 @@
 <main class="wrap">
   <header class="top">
     <h1>Вопрос по Трудовому кодексу РФ</h1>
-    <p class="lead">Поиск по смыслу (модель эмбеддингов multilingual-e5-small) находит статьи, а номер статьи в вопросе («ст. 81») сразу ставит её первой. Модели велено отвечать только по найденным фрагментам и ставить ссылку на статью к каждому утверждению.</p>
+    <p class="lead">Поиск по смыслу находит нужные места в кодексе. Модель читает эти статьи целиком (длинные — найденные части с соседними) и отвечает только по ним, со ссылкой на статью у каждого утверждения. Потом код проверяет ответ: ссылки только на прочитанные статьи, числа есть в тексте статей.</p>
   </header>
-
   <div id="mock-banner" class="banner" hidden>
     Демо-режим без ключа: поиск работает, вместо ответа модели показаны найденные фрагменты.
   </div>
   <div id="status-error" class="banner banner-error" hidden></div>
-
   <form id="ask-form" class="ask" autocomplete="off">
     <label for="question" class="sr-only">Вопрос</label>
     <textarea id="question" name="question" rows="3" maxlength="2000"
@@ -33,26 +31,52 @@
       <button type="button" class="chip">Сколько дней ежегодного оплачиваемого отпуска положено?</button>
       <button type="button" class="chip">Какой может быть срок испытания при приёме на работу?</button>
       <button type="button" class="chip">Когда должны выплатить окончательный расчёт при увольнении?</button>
+      <button type="button" class="chip">Можно ли уволить сотрудника на больничном?</button>
+      <button type="button" class="chip">Как оплачивается работа в выходной день?</button>
+      <button type="button" class="chip">Сколько часов сверхурочной работы допускается в год?</button>
     </div>
   </form>
-
   <section id="result" class="result" hidden aria-live="polite">
+    <ol id="steps" class="steps" hidden>
+      <li data-step="search">Поиск по кодексу</li>
+      <li data-step="read">Модель читает статьи</li>
+      <li data-step="write">Пишет ответ</li>
+      <li data-step="check">Код проверяет ссылки и числа</li>
+    </ol>
     <div id="notice" class="notice" hidden></div>
     <div id="answer-block" hidden>
-      <h2>Ответ</h2>
+      <div class="answer-head">
+        <h2>Ответ</h2>
+        <button type="button" id="copy-button" class="ghost" hidden>Скопировать</button>
+      </div>
       <div id="answer" class="answer"></div>
+      <p id="answer-checks" class="checks" hidden></p>
       <p id="answer-meta" class="muted"></p>
+    </div>
+    <div id="articles-block" hidden>
+      <h2>Что прочитала модель</h2>
+      <ul id="articles" class="articles"></ul>
     </div>
     <div id="fragments-block" hidden>
       <h2>Найденные фрагменты</h2>
-      <p class="muted">Справа — место фрагмента в выдаче поиска и его близость к вопросу (косинус, чем ближе к 1, тем ближе по смыслу).</p>
+      <p class="muted">Так поиск видит кодекс: куски статей до 350 символов. Справа — место фрагмента в выдаче и его близость к вопросу (косинус, чем ближе к 1, тем ближе по смыслу).</p>
       <div id="fragments"></div>
     </div>
   </section>
-
+  <div id="cite-card" class="cite-card" role="dialog" aria-modal="false" aria-labelledby="cite-title" hidden>
+    <button type="button" class="cite-close" id="cite-close" aria-label="Закрыть">×</button>
+    <p id="cite-title" class="cite-title"></p>
+    <p id="cite-chapter" class="muted"></p>
+    <blockquote id="cite-quote"></blockquote>
+    <p id="cite-coverage" class="muted"></p>
+    <p class="cite-links">
+      <a id="cite-source" target="_blank" rel="noopener noreferrer">Открыть в КонсультантПлюс ↗</a>
+      <a id="cite-fragment" href="#">Найденный фрагмент ↓</a>
+    </p>
+  </div>
   <footer class="foot">
     <p id="budget" class="budget">Токенов сегодня: —</p>
-    <p class="muted">Лимиты демо: дневной лимит токенов на ответы модели, не больше <span id="rate-limit">10</span> вопросов в час с одного адреса и <span id="hourly-limit">50&nbsp;000</span> токенов в час на всех посетителей. Повторный вопрос отвечается из кэша и токенов не тратит. Вопрос обрезается до <span id="max-chars">500</span> символов.</p>
+    <p class="muted">Лимиты демо: дневной лимит токенов на ответы модели, не больше <span id="rate-limit">10</span> вопросов в час с одного адреса и <span id="hourly-limit">100&nbsp;000</span> токенов в час на всех посетителей. Повторный вопрос отвечается из кэша и токенов не тратит. Вопрос обрезается до <span id="max-chars">500</span> символов.</p>
     <p><a href="/evals">Метрики качества (evals)</a></p>
     <p class="disclaimer">Это не юридическая консультация. Тексты статей могут отставать от действующей редакции — сверяйтесь с первоисточником.</p>
     <p class="muted">Автор: tavriq</p>
