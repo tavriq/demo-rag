@@ -42,9 +42,10 @@
   function rankText(f) {
     if (f.pinned) return "найдено по номеру статьи в вопросе";
     const parts = [];
-    parts.push("BM25 " + (f.bm25_rank ? "#" + f.bm25_rank : "—"));
-    parts.push("dense " + (f.dense_rank ? "#" + f.dense_rank : "—"));
-    return "score " + Number(f.score).toFixed(4) + " (" + parts.join(", ") + ")";
+    if (f.bm25_rank) parts.push("BM25 #" + f.bm25_rank);
+    if (f.dense_rank) parts.push("по смыслу #" + f.dense_rank);
+    if (f.dense_score !== null && f.dense_score !== undefined) parts.push("косинус " + Number(f.dense_score).toFixed(3));
+    return parts.join(" · ") || "—";
   }
 
   function renderFragments(fragments) {

@@ -111,7 +111,8 @@ class Settings:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if env is None else env
         var_dir = Path(_get(env, "VAR_DIR", "var"))
-        search_mode = _get(env, "SEARCH_MODE", "hybrid")
+        # dense + article router chosen on the dev split, see evals/tuning.md (iteration 4)
+        search_mode = _get(env, "SEARCH_MODE", "dense")
         if search_mode not in ("bm25", "dense", "hybrid"):
             raise ValueError(f"SEARCH_MODE must be bm25, dense or hybrid, got {search_mode!r}")
         effort = env.get("LLM_REASONING_EFFORT", "").strip().lower() or None

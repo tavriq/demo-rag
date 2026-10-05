@@ -1,0 +1,988 @@
+{
+  "date": "2026-10-05",
+  "generated_at": "2026-10-05T08:59:00+00:00",
+  "corpus": {
+    "path": "/app/data/corpus.jsonl",
+    "sha256": "9490ee6f670cdbc0cc01b40d13e113c534ed3ed47111b992c73ec16d6f28f674",
+    "n_docs": 534,
+    "n_chunks": 3200
+  },
+  "evals": {
+    "path": "data/evals.jsonl",
+    "split": "dev",
+    "limit": null,
+    "n_total": 26,
+    "n_positive": 22,
+    "n_negative": 4,
+    "types": {
+      "factual": 17,
+      "multi_hop": 5,
+      "negative": 4
+    }
+  },
+  "config": {
+    "embedding_model": "intfloat/multilingual-e5-small@qint8",
+    "chunk_max_chars": 350,
+    "top_k": 5,
+    "candidates": 30,
+    "rrf_k": 60,
+    "bm25_weight": 1.0,
+    "dense_weight": 1.5,
+    "search_mode": "hybrid",
+    "article_router": false
+  },
+  "runtime": {
+    "platform": "Linux x86_64",
+    "python": "3.12.15",
+    "onnxruntime": "1.30.0"
+  },
+  "retrieval": {
+    "main_mode": "hybrid",
+    "bm25": {
+      "n": 22,
+      "hit@1": 0.22727272727272727,
+      "hit@3": 0.36363636363636365,
+      "hit@5": 0.45454545454545453,
+      "mrr@10": 0.3098484848484848
+    },
+    "dense": {
+      "n": 22,
+      "hit@1": 0.6818181818181818,
+      "hit@3": 0.8181818181818182,
+      "hit@5": 0.8636363636363636,
+      "mrr@10": 0.7386363636363636
+    },
+    "hybrid": {
+      "n": 22,
+      "hit@1": 0.4090909090909091,
+      "hit@3": 0.7727272727272727,
+      "hit@5": 0.8181818181818182,
+      "mrr@10": 0.5753787878787878
+    },
+    "main_by_type": {
+      "factual": {
+        "n": 17,
+        "hit@1": 0.4117647058823529,
+        "hit@3": 0.7647058823529411,
+        "hit@5": 0.8235294117647058,
+        "mrr@10": 0.5877450980392157
+      },
+      "multi_hop": {
+        "n": 5,
+        "hit@1": 0.4,
+        "hit@3": 0.8,
+        "hit@5": 0.8,
+        "mrr@10": 0.5333333333333333
+      }
+    },
+    "main_by_split": {
+      "dev": {
+        "n": 22,
+        "hit@1": 0.4090909090909091,
+        "hit@3": 0.7727272727272727,
+        "hit@5": 0.8181818181818182,
+        "mrr@10": 0.5753787878787878
+      }
+    },
+    "context": {
+      "top_k": 5,
+      "n": 22,
+      "hit": 0.7272727272727273,
+      "distinct_articles_avg": 3.3636363636363638,
+      "distinct_articles_min": 2
+    },
+    "multi_article": {
+      "n": 5,
+      "any@5": 0.8,
+      "all@5": 0.2,
+      "all_in_context": 0.2
+    },
+    "misses": [
+      {
+        "q": "Сколько часов подряд мне должны давать отдыхать на неделе между сменами?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-110"
+        ],
+        "top": [
+          "TK-94",
+          "TK-284",
+          "TK-104",
+          "TK-108",
+          "TK-152"
+        ]
+      },
+      {
+        "q": "За сколько дней до начала отпуска мне должны перечислить отпускные?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-136"
+        ],
+        "top": [
+          "TK-125",
+          "TK-123",
+          "TK-115",
+          "TK-124",
+          "TK-257"
+        ]
+      },
+      {
+        "q": "Разбил по неосторожности рабочий ноутбук. До какой суммы я отвечаю своими деньгами?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-241"
+        ],
+        "top": [
+          "TK-236",
+          "TK-142",
+          "TK-140",
+          "TK-397",
+          "TK-391"
+        ]
+      },
+      {
+        "q": "Мне влепили выговор. Когда он сам снимется и могут ли уволить, если я снова что-то нарушу до этого?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-194",
+          "TK-81"
+        ],
+        "top": [
+          "TK-192",
+          "TK-228",
+          "TK-394",
+          "TK-80",
+          "TK-180"
+        ]
+      }
+    ],
+    "items": [
+      {
+        "q": "Меня берут на работу с испытательным сроком. Какой максимум по закону, если я не начальник?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-70"
+        ],
+        "rank": {
+          "bm25": 5,
+          "dense": 1,
+          "hybrid": 2
+        },
+        "main_top10": [
+          "TK-289",
+          "TK-70",
+          "TK-336.1",
+          "TK-185.1",
+          "TK-375",
+          "TK-71",
+          "TK-220",
+          "TK-173.1",
+          "TK-306",
+          "TK-174"
+        ],
+        "context_docs": [
+          "TK-289",
+          "TK-70",
+          "TK-336.1"
+        ]
+      },
+      {
+        "q": "Жена хочет сидеть с малышом дома подольше. До какого возраста ребёнка ей положен отпуск по уходу?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-256"
+        ],
+        "rank": {
+          "bm25": 1,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-256",
+          "TK-257",
+          "TK-123",
+          "TK-260",
+          "TK-122",
+          "TK-263",
+          "TK-322",
+          "TK-125",
+          "TK-262.1",
+          "TK-262.2"
+        ],
+        "context_docs": [
+          "TK-256",
+          "TK-257"
+        ]
+      },
+      {
+        "q": "Я на испытательном заболел и неделю был на больничном. Эта неделя идёт в срок испытания?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-70"
+        ],
+        "rank": {
+          "bm25": 1,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-70",
+          "TK-71",
+          "TK-14",
+          "TK-289",
+          "TK-320",
+          "TK-220",
+          "TK-230.1",
+          "TK-341",
+          "TK-374",
+          "TK-330.3"
+        ],
+        "context_docs": [
+          "TK-70",
+          "TK-71",
+          "TK-14"
+        ]
+      },
+      {
+        "q": "Какие документы кадровик вправе с меня потребовать при устройстве на обычную работу?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-65"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 3,
+          "hybrid": 2
+        },
+        "main_top10": [
+          "TK-283",
+          "TK-65",
+          "TK-22.2",
+          "TK-68",
+          "TK-196",
+          "TK-197",
+          "TK-187",
+          "TK-21",
+          "TK-407",
+          "TK-327.3"
+        ],
+        "context_docs": [
+          "TK-283",
+          "TK-65",
+          "TK-22.2"
+        ]
+      },
+      {
+        "q": "С какого возраста подростка можно официально оформить на работу?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-63"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 1,
+          "hybrid": 3
+        },
+        "main_top10": [
+          "TK-266",
+          "TK-94",
+          "TK-63",
+          "TK-270",
+          "TK-268",
+          "TK-272",
+          "TK-269",
+          "TK-20",
+          "TK-99",
+          "TK-327.1"
+        ],
+        "context_docs": [
+          "TK-266",
+          "TK-94",
+          "TK-63"
+        ]
+      },
+      {
+        "q": "Хочу уволиться по собственному. За сколько надо предупредить начальство?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-80"
+        ],
+        "rank": {
+          "bm25": 3,
+          "dense": 3,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-80",
+          "TK-292",
+          "TK-344",
+          "TK-71",
+          "TK-296",
+          "TK-280",
+          "TK-351.8",
+          "TK-180",
+          "TK-410",
+          "TK-327.6"
+        ],
+        "context_docs": [
+          "TK-80",
+          "TK-292",
+          "TK-344",
+          "TK-71"
+        ]
+      },
+      {
+        "q": "Какая у нас по закону нормальная рабочая неделя в часах?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-91"
+        ],
+        "rank": {
+          "bm25": 1,
+          "dense": 4,
+          "hybrid": 2
+        },
+        "main_top10": [
+          "TK-104",
+          "TK-91",
+          "TK-320",
+          "TK-263.1",
+          "TK-100",
+          "TK-92",
+          "TK-94",
+          "TK-176",
+          "TK-101",
+          "TK-111"
+        ],
+        "context_docs": [
+          "TK-104",
+          "TK-91",
+          "TK-320",
+          "TK-263.1",
+          "TK-100"
+        ]
+      },
+      {
+        "q": "Сколько часов в неделю может работать сотрудник, которому 17 лет?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-92"
+        ],
+        "rank": {
+          "bm25": 1,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-92",
+          "TK-94",
+          "TK-91",
+          "TK-320",
+          "TK-271",
+          "TK-95",
+          "TK-99",
+          "TK-96",
+          "TK-350",
+          "TK-174"
+        ],
+        "context_docs": [
+          "TK-92",
+          "TK-94",
+          "TK-91"
+        ]
+      },
+      {
+        "q": "Меня уволили, считаю что незаконно. Сколько у меня времени, чтобы подать в суд?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-392"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 1,
+          "hybrid": 3
+        },
+        "main_top10": [
+          "TK-413",
+          "TK-394",
+          "TK-392",
+          "TK-357",
+          "TK-390",
+          "TK-373",
+          "TK-80",
+          "TK-64",
+          "TK-79",
+          "TK-386"
+        ],
+        "context_docs": [
+          "TK-413",
+          "TK-394"
+        ]
+      },
+      {
+        "q": "Сколько часов подряд мне должны давать отдыхать на неделе между сменами?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-110"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 1,
+          "hybrid": 8
+        },
+        "main_top10": [
+          "TK-94",
+          "TK-284",
+          "TK-104",
+          "TK-108",
+          "TK-152",
+          "TK-103",
+          "TK-95",
+          "TK-110",
+          "TK-100",
+          "TK-107"
+        ],
+        "context_docs": [
+          "TK-94",
+          "TK-284",
+          "TK-104"
+        ]
+      },
+      {
+        "q": "Сколько дней длится обычный ежегодный оплачиваемый отпуск?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-115"
+        ],
+        "rank": {
+          "bm25": 2,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-115",
+          "TK-321",
+          "TK-120",
+          "TK-117",
+          "TK-322",
+          "TK-125",
+          "TK-267",
+          "TK-126",
+          "TK-334",
+          "TK-119"
+        ],
+        "context_docs": [
+          "TK-115",
+          "TK-321",
+          "TK-120",
+          "TK-117"
+        ]
+      },
+      {
+        "q": "Можно ли вместо части отпуска получить деньги?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-126"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 3,
+          "hybrid": 5
+        },
+        "main_top10": [
+          "TK-125",
+          "TK-137",
+          "TK-127",
+          "TK-263",
+          "TK-126",
+          "TK-116",
+          "TK-152",
+          "TK-325",
+          "TK-119",
+          "TK-349.3"
+        ],
+        "context_docs": [
+          "TK-125",
+          "TK-137",
+          "TK-127"
+        ]
+      },
+      {
+        "q": "За сколько дней до начала отпуска мне должны перечислить отпускные?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-136"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": null,
+          "hybrid": null
+        },
+        "main_top10": [
+          "TK-125",
+          "TK-123",
+          "TK-115",
+          "TK-124",
+          "TK-257",
+          "TK-322",
+          "TK-120",
+          "TK-321",
+          "TK-126",
+          "TK-128"
+        ],
+        "context_docs": [
+          "TK-125",
+          "TK-123",
+          "TK-115",
+          "TK-124",
+          "TK-257"
+        ]
+      },
+      {
+        "q": "Вызвали поработать в воскресенье, а у меня оклад. Сколько должны доплатить?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-153"
+        ],
+        "rank": {
+          "bm25": 5,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-153",
+          "TK-129",
+          "TK-271",
+          "TK-152",
+          "TK-178",
+          "TK-349.3",
+          "TK-139",
+          "TK-125",
+          "TK-262",
+          "TK-135"
+        ],
+        "context_docs": [
+          "TK-153",
+          "TK-129",
+          "TK-271"
+        ]
+      },
+      {
+        "q": "Какие виды дисциплинарных взысканий вообще бывают?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-192"
+        ],
+        "rank": {
+          "bm25": 3,
+          "dense": 1,
+          "hybrid": 2
+        },
+        "main_top10": [
+          "TK-193",
+          "TK-192",
+          "TK-194",
+          "TK-135",
+          "TK-248",
+          "TK-195",
+          "TK-66",
+          "TK-181.1",
+          "TK-81",
+          "TK-6"
+        ],
+        "context_docs": [
+          "TK-193",
+          "TK-192"
+        ]
+      },
+      {
+        "q": "Начальник требует объяснительную. Сколько у меня времени, чтобы её написать?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-193"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-193",
+          "TK-93",
+          "TK-92",
+          "TK-386",
+          "TK-392",
+          "TK-64",
+          "TK-336.1",
+          "TK-292",
+          "TK-79",
+          "TK-306"
+        ],
+        "context_docs": [
+          "TK-193",
+          "TK-93",
+          "TK-92",
+          "TK-386"
+        ]
+      },
+      {
+        "q": "Разбил по неосторожности рабочий ноутбук. До какой суммы я отвечаю своими деньгами?",
+        "type": "factual",
+        "split": "dev",
+        "expected_ids": [
+          "TK-241"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": null,
+          "hybrid": null
+        },
+        "main_top10": [
+          "TK-236",
+          "TK-142",
+          "TK-140",
+          "TK-397",
+          "TK-391",
+          "TK-235",
+          "TK-66.1",
+          "TK-394",
+          "TK-243",
+          "TK-392"
+        ],
+        "context_docs": [
+          "TK-236",
+          "TK-142",
+          "TK-140",
+          "TK-397",
+          "TK-391"
+        ]
+      },
+      {
+        "q": "Сколько сверхурочных можно набрать за год и по какому тарифу их оплатят?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-99",
+          "TK-152"
+        ],
+        "rank": {
+          "bm25": 1,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-152",
+          "TK-99",
+          "TK-185.1",
+          "TK-329.1",
+          "TK-95",
+          "TK-174",
+          "TK-176",
+          "TK-173.1",
+          "TK-264",
+          "TK-130"
+        ],
+        "context_docs": [
+          "TK-152",
+          "TK-99"
+        ]
+      },
+      {
+        "q": "Увольняюсь, а у меня остались неотгулянные дни отпуска. Мне их заплатят и в какой день?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-127",
+          "TK-140"
+        ],
+        "rank": {
+          "bm25": 8,
+          "dense": 1,
+          "hybrid": 3
+        },
+        "main_top10": [
+          "TK-153",
+          "TK-137",
+          "TK-127",
+          "TK-121",
+          "TK-139",
+          "TK-136",
+          "TK-178",
+          "TK-318",
+          "TK-112",
+          "TK-291"
+        ],
+        "context_docs": [
+          "TK-153",
+          "TK-137",
+          "TK-127"
+        ]
+      },
+      {
+        "q": "Мне влепили выговор. Когда он сам снимется и могут ли уволить, если я снова что-то нарушу до этого?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-194",
+          "TK-81"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": null,
+          "hybrid": null
+        },
+        "main_top10": [
+          "TK-192",
+          "TK-228",
+          "TK-394",
+          "TK-80",
+          "TK-180",
+          "TK-373",
+          "TK-178",
+          "TK-318",
+          "TK-406",
+          "TK-374"
+        ],
+        "context_docs": [
+          "TK-192",
+          "TK-228",
+          "TK-394",
+          "TK-80"
+        ]
+      },
+      {
+        "q": "Начальник говорит, что за мой прогул накажет через полтора месяца, когда сам разберётся. Это законно и что вообще считается прогулом?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-193",
+          "TK-81"
+        ],
+        "rank": {
+          "bm25": 8,
+          "dense": 1,
+          "hybrid": 1
+        },
+        "main_top10": [
+          "TK-81",
+          "TK-121",
+          "TK-373",
+          "TK-318",
+          "TK-374",
+          "TK-292",
+          "TK-394",
+          "TK-83",
+          "TK-412",
+          "TK-348.12"
+        ],
+        "context_docs": [
+          "TK-81",
+          "TK-121",
+          "TK-373",
+          "TK-318",
+          "TK-374"
+        ]
+      },
+      {
+        "q": "С меня хотят удержать за испорченный инструмент. Сколько максимум я должен возместить и сколько могут вычесть из одной зарплаты?",
+        "type": "multi_hop",
+        "split": "dev",
+        "expected_ids": [
+          "TK-241",
+          "TK-138"
+        ],
+        "rank": {
+          "bm25": null,
+          "dense": 1,
+          "hybrid": 3
+        },
+        "main_top10": [
+          "TK-234",
+          "TK-248",
+          "TK-138",
+          "TK-249",
+          "TK-236",
+          "TK-235",
+          "TK-173",
+          "TK-377",
+          "TK-412",
+          "TK-174"
+        ],
+        "context_docs": [
+          "TK-234",
+          "TK-248",
+          "TK-138"
+        ]
+      }
+    ]
+  },
+  "spot_checks": [
+    {
+      "q": "Сколько дней ежегодного оплачиваемого отпуска положено?",
+      "type": "ui_example",
+      "expected_id": "TK-115",
+      "rank": {
+        "bm25": 2,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-115",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "Какой может быть срок испытания при приёме на работу?",
+      "type": "ui_example",
+      "expected_id": "TK-70",
+      "rank": {
+        "bm25": 2,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-70",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "Когда должны выплатить окончательный расчёт при увольнении?",
+      "type": "ui_example",
+      "expected_id": "TK-140",
+      "rank": {
+        "bm25": 1,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-140",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "За сколько нужно предупредить работодателя об увольнении по собственному желанию?",
+      "type": "ui_placeholder",
+      "expected_id": "TK-80",
+      "rank": {
+        "bm25": 1,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-80",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "Как оплачивается работа в выходной день?",
+      "type": "readme_example",
+      "expected_id": "TK-153",
+      "rank": {
+        "bm25": 1,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-153",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "статья 186.1",
+      "type": "by_number",
+      "expected_id": "TK-186.1",
+      "rank": {
+        "bm25": 1,
+        "dense": null,
+        "hybrid": null
+      },
+      "top_fragment_doc": "TK-351.6",
+      "top_fragment_pinned": false,
+      "ok": false
+    },
+    {
+      "q": "статья 81",
+      "type": "by_number",
+      "expected_id": "TK-81",
+      "rank": {
+        "bm25": 2,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-81",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "статья 312.1",
+      "type": "by_number",
+      "expected_id": "TK-312.1",
+      "rank": {
+        "bm25": 1,
+        "dense": 2,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-312.1",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "статья 84.1",
+      "type": "by_number",
+      "expected_id": "TK-84.1",
+      "rank": {
+        "bm25": 1,
+        "dense": null,
+        "hybrid": null
+      },
+      "top_fragment_doc": "TK-264.1",
+      "top_fragment_pinned": false,
+      "ok": false
+    },
+    {
+      "q": "статья 22.1",
+      "type": "by_number",
+      "expected_id": "TK-22.1",
+      "rank": {
+        "bm25": 2,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-22.1",
+      "top_fragment_pinned": false,
+      "ok": true
+    },
+    {
+      "q": "ст. 80 ТК РФ",
+      "type": "by_number",
+      "expected_id": "TK-80",
+      "rank": {
+        "bm25": 1,
+        "dense": 1,
+        "hybrid": 1
+      },
+      "top_fragment_doc": "TK-80",
+      "top_fragment_pinned": false,
+      "ok": true
+    }
+  ],
+  "answers": {
+    "status": "not_run",
+    "reason": "не запрашивалось (запуск без --answers)"
+  }
+}

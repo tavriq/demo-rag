@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RAG по Трудовому кодексу</title>
-<meta name="description" content="Демо: гибридный поиск по Трудовому кодексу РФ и ответы с цитатами статей.">
+<meta name="description" content="Демо: поиск по Трудовому кодексу РФ и ответы модели со ссылками на статьи.">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
@@ -12,7 +12,7 @@
 <main class="wrap">
   <header class="top">
     <h1>Вопрос по Трудовому кодексу РФ</h1>
-    <p class="lead">Гибридный поиск (BM25 + эмбеддинги, слияние RRF) находит статьи. Модели велено отвечать только по ним и ставить ссылку на статью к каждому утверждению.</p>
+    <p class="lead">Поиск по смыслу (модель эмбеддингов multilingual-e5-small) находит статьи, а номер статьи в вопросе («ст. 81») сразу ставит её первой. Модели велено отвечать только по найденным фрагментам и ставить ссылку на статью к каждому утверждению.</p>
   </header>
 
   <div id="mock-banner" class="banner" hidden>
@@ -45,7 +45,7 @@
     </div>
     <div id="fragments-block" hidden>
       <h2>Найденные фрагменты</h2>
-      <p class="muted">Score — RRF; в скобках позиции в выдаче BM25 и dense-поиска.</p>
+      <p class="muted">Справа — место фрагмента в выдаче поиска и его близость к вопросу (косинус, чем ближе к 1, тем ближе по смыслу).</p>
       <div id="fragments"></div>
     </div>
   </section>
