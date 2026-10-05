@@ -114,3 +114,62 @@ def test_build_index_if_missing_rebuilds_on_version_change(tmp_path, monkeypatch
     assert cli.main(args + ["--if-missing"]) == 0
     assert "index built" in capsys.readouterr().out
     assert json.loads((out / "meta.json").read_text())["version"] != 1
+
+
+KNOWN = frozenset({"3", "80", "81", "84.1", "186.1", "312.1", "341.1", "341.1-1", "348.11-1"})
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("статья 186.1", ["186.1"]),
+        ("ст. 84.1 ТК РФ", ["84.1"]),
+        ("Ст.80", ["80"]),
+        ("ст 81", ["81"]),
+        ("что гласит статья 341.1-1", ["341.1-1"]),
+        ("по статье 348.11-1", ["348.11-1"]),
+        ("п. 6 ч. 1 ст. 81 — прогул", ["81"]),
+        ("ст. 80, 81", ["80", "81"]),
+        ("ст.ст. 80, 81", ["80", "81"]),
+        ("статьи 80-81", ["80", "81"]),  # not an article itself: two articles
+        ("ст. 80 и 3 дня", ["80"]),  # «и» does not continue the list
+        ("статья 999", []),  # not in the corpus
+        ("стаж 5 лет", []),
+        ("пост 81", []),
+        ("статья 81 и статья 80 и ст. 3 и ст. 312.1", ["81", "80", "3"]),  # at most three articles
+        ("Сколько дней отпуск?", []),
+    ],
+)
+def test_article_router_finds_numbers(query, expected):
+    from app.router import find_article_refs
+
+    assert find_article_refs(query, KNOWN) == expected
+
+
+def test_router_pins_named_article_first_in_every_mode(index_dir):
+    index = Index.load(index_dir)
+    retriever = Retriever(index, HashEmbedder())
+    article = "81"
+    for mode in ("bm25", "dense", "hybrid"):
+        hits = retriever.search(f"что сказано в ст. {article}", top_k=5, mode=mode)
+        assert hits[0].chunk.article == article and hits[0].pinned
+        pinned = [h for h in hits if h.pinned]
+        assert 1 <= len(pinned) <= 3 and all(h.chunk.article == article for h in pinned)
+        assert retriever.rank_docs(f"ст. {article}", mode=mode)[0] == f"TK-{article}"
+
+
+def test_router_can_be_switched_off(index_dir):
+    retriever = Retriever(Index.load(index_dir), HashEmbedder(), article_router=False)
+    assert not any(h.pinned for h in retriever.search("ст. 81", top_k=5))
+
+
+def test_default_mode_comes_from_the_retriever(index_dir):
+    index = Index.load(index_dir)
+    q = "сверхурочная работа сколько часов в год"
+    dense = Retriever(index, HashEmbedder(), mode="dense")
+    assert [h.chunk.chunk_id for h in dense.search(q, top_k=3)] == [
+        h.chunk.chunk_id for h in dense.search(q, top_k=3, mode="dense")
+    ]
+    assert all(h.bm25_rank is None for h in dense.search(q, top_k=3))
+    with pytest.raises(ValueError):
+        Retriever(index, HashEmbedder(), mode="magic")
