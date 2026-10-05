@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG по Трудовому кодексу</title>
+<meta name="description" content="Демо: гибридный поиск по Трудовому кодексу РФ и ответы с цитатами статей.">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <h1>Вопрос по Трудовому кодексу РФ</h1>
+    <p class="lead">Гибридный поиск (BM25 + эмбеддинги, слияние RRF) находит статьи, модель отвечает только по ним и ставит ссылку на статью к каждому утверждению.</p>
+  </header>
+
+  <div id="mock-banner" class="banner" hidden>
+    Демо-режим без ключа: поиск работает, вместо ответа модели показаны найденные фрагменты.
+  </div>
+  <div id="status-error" class="banner banner-error" hidden></div>
+
+  <form id="ask-form" class="ask" autocomplete="off">
+    <label for="question" class="sr-only">Вопрос</label>
+    <textarea id="question" name="question" rows="3" maxlength="2000"
+      placeholder="Например: за сколько дней нужно предупредить работодателя об увольнении?"></textarea>
+    <div class="ask-row">
+      <span id="char-count" class="muted">0 / 500</span>
+      <button type="submit" id="ask-button">Спросить</button>
+    </div>
+    <div class="examples" id="examples">
+      <span class="muted">Примеры:</span>
+      <button type="button" class="chip">Сколько длится ежегодный оплачиваемый отпуск?</button>
+      <button type="button" class="chip">Какой максимальный испытательный срок?</button>
+      <button type="button" class="chip">Когда должны выплатить окончательный расчёт при увольнении?</button>
+    </div>
+  </form>
+
+  <section id="result" class="result" hidden aria-live="polite">
+    <div id="notice" class="notice" hidden></div>
+    <div id="answer-block" hidden>
+      <h2>Ответ</h2>
+      <div id="answer" class="answer"></div>
+      <p id="answer-meta" class="muted"></p>
+    </div>
+    <div id="fragments-block" hidden>
+      <h2>Найденные фрагменты</h2>
+      <p class="muted">Score — RRF; в скобках позиции в выдаче BM25 и dense-поиска.</p>
+      <div id="fragments"></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p id="budget" class="budget">Потрачено сегодня: —</p>
+    <p class="muted">Лимиты демо: дневной бюджет на ответы модели и не больше <span id="rate-limit">10</span> вопросов в час с одного адреса. Вопрос обрезается до <span id="max-chars">500</span> символов.</p>
+    <p><a href="/evals">Метрики качества (evals)</a></p>
+    <p class="disclaimer">Это не юридическая консультация. Тексты статей могут отставать от действующей редакции — сверяйтесь с первоисточником.</p>
+    <p class="muted">Автор: tavriq</p>
+  </footer>
+</main>
+</body>
+</html>
