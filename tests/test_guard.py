@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from app.guard import CostGuard
-from app.netutil import client_ip
+from app.netutil import client_ip, rate_limit_key
 from app.config import parse_trusted_proxies
 from app.pricing import cost_usd, estimate_max_cost
 
@@ -84,7 +84,13 @@ def test_ip_is_stored_hashed_only(tmp_path, clock):
 
 def test_status_shape(tmp_path, clock):
     status = make_guard(tmp_path, clock, budget=1.0, per_hour=10).status()
-    assert status == {"day_utc": "2026-09-21", "spent_usd": 0.0, "limit_usd": 1.0, "rate_limit_per_hour": 10}
+    assert status == {
+        "day_utc": "2026-09-21",
+        "spent_usd": 0.0,
+        "limit_usd": 1.0,
+        "rate_limit_per_hour": 10,
+        "global_paid_per_hour": 20,
+    }
 
 
 def test_cost_from_usage_haiku_prices():
@@ -117,3 +123,71 @@ def test_estimate_is_an_upper_bound_for_typical_prompt():
 )
 def test_client_ip(peer, xff, trusted, expected):
     assert client_ip(peer, xff, parse_trusted_proxies(trusted)) == expected
+
+
+def test_global_hourly_cap_on_paid_answers(tmp_path, clock):
+    guard = CostGuard(tmp_path / "g.sqlite", 100.0, 1000, clock=clock, global_paid_per_hour=3)
+    for i in range(3):
+        assert guard.check_and_reserve(f"10.0.0.{i}", 0.001).allowed
+    blocked = guard.check_and_reserve("10.0.0.99", 0.001)
+    assert not blocked.allowed and blocked.code == "global_limited"
+    assert 0 < blocked.retry_after_s <= 3600
+    # free (mock or cached) answers are not capped
+    assert guard.check_and_reserve("10.0.0.99", 0.0, charge=False).allowed
+    clock.advance(3601)
+    assert guard.check_and_reserve("10.0.0.99", 0.001).allowed
+
+
+def test_released_reservations_do_not_count_toward_global_cap(tmp_path, clock):
+    guard = CostGuard(tmp_path / "g.sqlite", 100.0, 1000, clock=clock, global_paid_per_hour=1)
+    first = guard.check_and_reserve("10.0.0.1", 0.01)
+    guard.release(first.reservation_id)
+    assert guard.spent_today() == 0
+    assert guard.check_and_reserve("10.0.0.2", 0.01).allowed
+
+
+def test_reserve_without_client_skips_rate_limit(tmp_path, clock):
+    guard = make_guard(tmp_path, clock, budget=1.0, per_hour=1)
+    for _ in range(3):
+        assert guard.check_and_reserve(None, 0.001).allowed
+
+
+@pytest.mark.parametrize(
+    "ip, key",
+    [
+        ("203.0.113.7", "203.0.113.7"),
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),
+        ("2001:db8:1:3::1", "2001:db8:1:3::/64"),
+        ("::ffff:198.51.100.4", "198.51.100.4"),
+        ("unknown", "unknown"),
+    ],
+)
+def test_rate_limit_key(ip, key):
+    assert rate_limit_key(ip) == key
+
+
+def test_ipv6_rotation_inside_a_64_hits_the_limit(tmp_path, clock):
+    guard = make_guard(tmp_path, clock, budget=100, per_hour=10)
+    allowed = [guard.check_and_reserve(rate_limit_key(f"2001:db8::{i:x}"), 0.0, charge=False).allowed for i in range(1, 51)]
+    assert allowed.count(True) == 10
+
+
+def test_salt_is_not_stored_and_old_hashes_are_dropped_on_start(tmp_path, clock):
+    guard = make_guard(tmp_path, clock)
+    guard.check_and_reserve("203.0.113.77", 0.0, charge=False)
+    with sqlite3.connect(tmp_path / "g.sqlite") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM meta WHERE key = 'ip_salt'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
+    make_guard(tmp_path, clock)  # restart: new salt, old hashes are useless and removed
+    with sqlite3.connect(tmp_path / "g.sqlite") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+def test_status_purges_rows_older_than_an_hour(tmp_path, clock):
+    guard = make_guard(tmp_path, clock)
+    guard.check_and_reserve("203.0.113.77", 0.0, charge=False)
+    clock.advance(3601)
+    guard.status()
+    with sqlite3.connect(tmp_path / "g.sqlite") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0

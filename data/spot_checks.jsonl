@@ -1,0 +1,11 @@
+{"q": "Сколько дней ежегодного оплачиваемого отпуска положено?", "expected_id": "TK-115", "type": "ui_example"}
+{"q": "Какой может быть срок испытания при приёме на работу?", "expected_id": "TK-70", "type": "ui_example"}
+{"q": "Когда должны выплатить окончательный расчёт при увольнении?", "expected_id": "TK-140", "type": "ui_example"}
+{"q": "За сколько нужно предупредить работодателя об увольнении по собственному желанию?", "expected_id": "TK-80", "type": "ui_placeholder"}
+{"q": "Как оплачивается работа в выходной день?", "expected_id": "TK-153", "type": "readme_example"}
+{"q": "статья 186.1", "expected_id": "TK-186.1", "type": "by_number"}
+{"q": "статья 81", "expected_id": "TK-81", "type": "by_number"}
+{"q": "статья 312.1", "expected_id": "TK-312.1", "type": "by_number"}
+{"q": "статья 84.1", "expected_id": "TK-84.1", "type": "by_number"}
+{"q": "статья 22.1", "expected_id": "TK-22.1", "type": "by_number"}
+{"q": "ст. 80 ТК РФ", "expected_id": "TK-80", "type": "by_number"}

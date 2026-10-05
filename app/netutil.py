@@ -7,7 +7,10 @@ rate limit.
 
 from __future__ import annotations
 
-from ipaddress import IPv4Network, IPv6Network, ip_address
+from ipaddress import IPv4Network, IPv6Address, IPv6Network, ip_address, ip_network
+
+# One IPv6 subscriber usually gets a whole /64, so a per-address limit is no limit.
+IPV6_PREFIX = 64
 
 
 def _in_networks(ip: str, networks: tuple[IPv4Network | IPv6Network, ...]) -> bool:
@@ -36,3 +39,16 @@ def client_ip(
         if not _in_networks(hop, trusted):
             return hop
     return peer
+
+
+def rate_limit_key(ip: str) -> str:
+    """Bucket for the per-client rate limit: the IPv4 address, or the IPv6 /64 network."""
+    try:
+        addr = ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ip_network(f"{addr}/{IPV6_PREFIX}", strict=False))
+    return str(addr)

@@ -20,6 +20,7 @@
       "Потрачено сегодня: " + fmtUsd(budget.spent_usd) + " из " + fmtUsd(budget.limit_usd) +
       " (сутки по UTC)";
     if (budget.rate_limit_per_hour) $("rate-limit").textContent = String(budget.rate_limit_per_hour);
+    if (budget.global_paid_per_hour) $("global-limit").textContent = String(budget.global_paid_per_hour);
   }
 
   function updateCount() {
@@ -81,7 +82,10 @@
     }
     $("answer").innerHTML = data.answer.html; // escaped on the server
     const meta = [];
-    if (data.mode === "live") {
+    if (data.mode === "live" && data.cached) {
+      meta.push("модель " + data.model);
+      meta.push("ответ из кэша" + (data.cached_at ? " от " + data.cached_at.slice(0, 10) : "") + ", бесплатно");
+    } else if (data.mode === "live") {
       meta.push("модель " + data.model);
       if (data.usage) meta.push(data.usage.input_tokens + " → " + data.usage.output_tokens + " токенов");
       meta.push("стоимость " + fmtUsd(data.cost_usd));
@@ -108,7 +112,8 @@
       try { data = await resp.json(); } catch (_) { data = {}; }
       setBudget(data.budget);
       if (!resp.ok) {
-        const msg = data.message || (resp.status === 422 ? "Вопрос слишком длинный." : "Ошибка " + resp.status);
+        const msg = data.message ||
+          (resp.status === 422 || resp.status === 413 ? "Вопрос слишком длинный." : "Ошибка " + resp.status);
         showNotice(msg);
         $("answer-block").hidden = true;
         renderFragments(data.fragments || []);

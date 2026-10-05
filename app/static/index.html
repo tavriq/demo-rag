@@ -12,7 +12,7 @@
 <main class="wrap">
   <header class="top">
     <h1>Вопрос по Трудовому кодексу РФ</h1>
-    <p class="lead">Гибридный поиск (BM25 + эмбеддинги, слияние RRF) находит статьи, модель отвечает только по ним и ставит ссылку на статью к каждому утверждению.</p>
+    <p class="lead">Гибридный поиск (BM25 + эмбеддинги, слияние RRF) находит статьи. Модели велено отвечать только по ним и ставить ссылку на статью к каждому утверждению.</p>
   </header>
 
   <div id="mock-banner" class="banner" hidden>
@@ -23,15 +23,15 @@
   <form id="ask-form" class="ask" autocomplete="off">
     <label for="question" class="sr-only">Вопрос</label>
     <textarea id="question" name="question" rows="3" maxlength="2000"
-      placeholder="Например: за сколько дней нужно предупредить работодателя об увольнении?"></textarea>
+      placeholder="Например: За сколько нужно предупредить работодателя об увольнении по собственному желанию?"></textarea>
     <div class="ask-row">
       <span id="char-count" class="muted">0 / 500</span>
       <button type="submit" id="ask-button">Спросить</button>
     </div>
     <div class="examples" id="examples">
       <span class="muted">Примеры:</span>
-      <button type="button" class="chip">Сколько длится ежегодный оплачиваемый отпуск?</button>
-      <button type="button" class="chip">Какой максимальный испытательный срок?</button>
+      <button type="button" class="chip">Сколько дней ежегодного оплачиваемого отпуска положено?</button>
+      <button type="button" class="chip">Какой может быть срок испытания при приёме на работу?</button>
       <button type="button" class="chip">Когда должны выплатить окончательный расчёт при увольнении?</button>
     </div>
   </form>
@@ -52,7 +52,7 @@
 
   <footer class="foot">
     <p id="budget" class="budget">Потрачено сегодня: —</p>
-    <p class="muted">Лимиты демо: дневной бюджет на ответы модели и не больше <span id="rate-limit">10</span> вопросов в час с одного адреса. Вопрос обрезается до <span id="max-chars">500</span> символов.</p>
+    <p class="muted">Лимиты демо: дневной бюджет на ответы модели, не больше <span id="rate-limit">10</span> вопросов в час с одного адреса и <span id="global-limit">20</span> новых платных ответов в час на всех. Повторный вопрос отвечается из кэша бесплатно. Вопрос обрезается до <span id="max-chars">500</span> символов.</p>
     <p><a href="/evals">Метрики качества (evals)</a></p>
     <p class="disclaimer">Это не юридическая консультация. Тексты статей могут отставать от действующей редакции — сверяйтесь с первоисточником.</p>
     <p class="muted">Автор: tavriq</p>

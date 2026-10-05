@@ -76,6 +76,8 @@ class Settings:
     max_question_chars: int
     daily_budget_usd: float
     rate_limit_per_hour: int
+    global_paid_per_hour: int
+    warm_cache: bool
     trusted_proxies: tuple[IPv4Network | IPv6Network, ...]
     has_api_key: bool
 
@@ -105,6 +107,8 @@ class Settings:
             max_question_chars=_get_int(env, "MAX_QUESTION_CHARS", 500, minimum=20),
             daily_budget_usd=_get_float(env, "DAILY_BUDGET_USD", 1.00),
             rate_limit_per_hour=_get_int(env, "RATE_LIMIT_PER_HOUR", 10, minimum=1),
+            global_paid_per_hour=_get_int(env, "GLOBAL_PAID_PER_HOUR", 20, minimum=1),
+            warm_cache=_get(env, "WARM_CACHE", "1").lower() not in ("0", "false", "no"),
             trusted_proxies=parse_trusted_proxies(env.get("TRUSTED_PROXY", "")),
             has_api_key=bool(env.get("ANTHROPIC_API_KEY", "").strip()),
         )
