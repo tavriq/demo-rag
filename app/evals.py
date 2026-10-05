@@ -149,7 +149,9 @@ def render_markdown(report: dict) -> str:
         f"{report['corpus']['n_chunks']} чанков. Вопросы: `{report['evals']['path']}` — "
         f"{report['evals']['n_total']} (с ответом {report['evals']['n_positive']}, "
         f"negative {report['evals']['n_negative']}).",
-        f"Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}.",
+        f"Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}, "
+        f"RRF k={report['config']['rrf_k']}, веса BM25/dense {report['config'].get('bm25_weight', 1.0)}"
+        f"/{report['config'].get('dense_weight', 1.0)}.",
         "",
         "## Поиск (без LLM, negative не учитываются)",
         "",
@@ -234,6 +236,8 @@ def run(
             "top_k": top_k,
             "candidates": candidates,
             "rrf_k": rrf_k,
+            "bm25_weight": retriever.bm25_weight,
+            "dense_weight": retriever.dense_weight,
         },
         "retrieval": run_retrieval(retriever, items),
     }
@@ -259,9 +263,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     index = Index.load(args.index)
-    backend = "hash" if index.meta.get("embedding_model") == HashEmbedder.name else "fastembed"
+    backend = "hash" if index.meta.get("embedding_model") == HashEmbedder.name else "onnx"
     embedder = make_embedder(backend, index.meta["embedding_model"], settings.models_dir, settings.embed_threads)
-    retriever = Retriever(index, embedder, candidates=settings.candidates, rrf_k=settings.rrf_k)
+    retriever = Retriever(
+        index,
+        embedder,
+        candidates=settings.candidates,
+        rrf_k=settings.rrf_k,
+        bm25_weight=settings.bm25_weight,
+        dense_weight=settings.dense_weight,
+    )
     items = load_evals(args.evals)[: args.limit]
 
     generator = None

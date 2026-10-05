@@ -5,9 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     VAR_DIR=/var/lib/demo-rag \
-    HF_HOME=/var/lib/demo-rag/hf \
-    HF_HUB_DISABLE_TELEMETRY=1 \
-    HF_HUB_DISABLE_XET=1 \
     CORPUS_PATH=/app/data/corpus.jsonl \
     EVALS_DIR=/app/evals
 

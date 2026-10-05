@@ -2,7 +2,7 @@
 anthropic==1.11.0
 fastapi==0.142.2
 uvicorn==0.54.0
-fastembed==0.8.1
 onnxruntime==1.30.0
 numpy==2.5.3
+sentencepiece==0.2.2
 snowballstemmer==3.1.1

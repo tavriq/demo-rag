@@ -104,11 +104,13 @@ def render_evals_page(latest: dict | None) -> str:
     )
     out.append(
         "<p class=\"muted\">Эмбеддинги: <code>{model}</code>, top-k {k}, кандидатов на ретривер {cand}, "
-        "RRF k={rrf}. Negative-вопросы в hit@k не входят.</p>".format(
+        "RRF k={rrf}, веса BM25/dense {wb}/{wd}. Negative-вопросы в hit@k не входят.</p>".format(
             model=esc(config.get("embedding_model")),
             k=esc(config.get("top_k")),
             cand=esc(config.get("candidates")),
             rrf=esc(config.get("rrf_k")),
+            wb=esc(config.get("bm25_weight", 1.0)),
+            wd=esc(config.get("dense_weight", 1.0)),
         )
     )
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Mapping
 
 LLM_MODEL = "claude-haiku-4-5-20251001"
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small@qint8"
 
 
 def _get(env: Mapping[str, str], name: str, default: str) -> str:
@@ -69,6 +69,8 @@ class Settings:
     max_top_k: int
     candidates: int
     rrf_k: int
+    bm25_weight: float
+    dense_weight: float
     llm_model: str
     max_tokens: int
     max_question_chars: int
@@ -88,7 +90,7 @@ class Settings:
             models_dir=Path(_get(env, "MODELS_DIR", str(var_dir / "models"))),
             guard_db=Path(_get(env, "GUARD_DB", str(var_dir / "guard.sqlite"))),
             evals_dir=Path(_get(env, "EVALS_DIR", "evals")),
-            embedding_backend=_get(env, "EMBEDDING_BACKEND", "fastembed"),
+            embedding_backend=_get(env, "EMBEDDING_BACKEND", "onnx"),
             embedding_model=_get(env, "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
             embed_threads=_get_int(env, "EMBED_THREADS", 2, minimum=1),
             chunk_max_chars=_get_int(env, "CHUNK_MAX_CHARS", 1200, minimum=200),
@@ -96,6 +98,8 @@ class Settings:
             max_top_k=_get_int(env, "MAX_TOP_K", 8, minimum=1),
             candidates=_get_int(env, "RETRIEVAL_CANDIDATES", 30, minimum=1),
             rrf_k=_get_int(env, "RRF_K", 60, minimum=1),
+            bm25_weight=_get_float(env, "BM25_WEIGHT", 1.0),
+            dense_weight=_get_float(env, "DENSE_WEIGHT", 1.0),
             llm_model=_get(env, "LLM_MODEL", LLM_MODEL),
             max_tokens=_get_int(env, "MAX_TOKENS", 600, minimum=50),
             max_question_chars=_get_int(env, "MAX_QUESTION_CHARS", 500, minimum=20),

@@ -25,8 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build BM25 + dense index from a JSONL corpus.")
     parser.add_argument("--corpus", default=str(settings.corpus_path), help="path to corpus.jsonl")
     parser.add_argument("--out", default=str(settings.index_dir), help="index directory")
-    parser.add_argument("--backend", default=settings.embedding_backend, choices=["fastembed", "hash"])
-    parser.add_argument("--model", default=settings.embedding_model, help="fastembed model name")
+    parser.add_argument("--backend", default=settings.embedding_backend, choices=["onnx", "hash"])
+    parser.add_argument("--model", default=settings.embedding_model, help="embedding model name (see app/embeddings.py)")
     parser.add_argument("--chunk-max-chars", type=int, default=settings.chunk_max_chars)
     parser.add_argument(
         "--if-missing",

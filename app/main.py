@@ -6,6 +6,7 @@ trust) is handled by app.netutil according to TRUSTED_PROXY.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import time
@@ -88,7 +89,14 @@ def _load_retriever(settings: Settings) -> Retriever:
     embedder = make_embedder(
         settings.embedding_backend, settings.embedding_model, settings.models_dir, settings.embed_threads
     )
-    return Retriever(index, embedder, candidates=settings.candidates, rrf_k=settings.rrf_k)
+    return Retriever(
+        index,
+        embedder,
+        candidates=settings.candidates,
+        rrf_k=settings.rrf_k,
+        bm25_weight=settings.bm25_weight,
+        dense_weight=settings.dense_weight,
+    )
 
 
 def create_app(
@@ -109,6 +117,11 @@ def create_app(
             log.error("index not loaded: %s", index_error)
     generator = generator or make_generator(settings.llm_model, settings.max_tokens, settings.has_api_key)
     guard = guard or CostGuard(settings.guard_db, settings.daily_budget_usd, settings.rate_limit_per_hour)
+
+    # Longest fragment as it is sent to the model (+ tag overhead): basis of the worst-case cost estimate.
+    max_fragment_chars = settings.chunk_max_chars + 300
+    if retriever is not None and retriever.index.chunks:
+        max_fragment_chars = max(len(c.display_text) for c in retriever.index.chunks) + 150
 
     app = FastAPI(title="RAG по Трудовому кодексу РФ", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
@@ -178,8 +191,8 @@ def create_app(
         live = generator.mode == "live"
         estimate = 0.0
         if live:
-            # Upper bound before retrieval: top_k full-size chunks + question + system prompt.
-            prompt_chars = len(SYSTEM_PROMPT) + len(question) + top_k * (settings.chunk_max_chars + 300)
+            # Upper bound before retrieval: top_k longest fragments + escaped question + system prompt.
+            prompt_chars = len(SYSTEM_PROMPT) + len(html.escape(question)) + 100 + top_k * max_fragment_chars
             estimate = estimate_max_cost(settings.llm_model, prompt_chars, settings.max_tokens)
         decision = guard.check_and_reserve(ip, estimate, charge=live)
         if not decision.allowed and decision.code == "rate_limited":

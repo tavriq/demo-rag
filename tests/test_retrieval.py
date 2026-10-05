@@ -76,3 +76,20 @@ def test_index_roundtrip_and_embedder_mismatch(index_dir):
     other.name = "some-other-model"
     with pytest.raises(ValueError, match="rebuild"):
         Retriever(index, other)
+
+
+def test_weighted_rrf():
+    fused = dict(rrf_fuse([[1, 2], [2, 1]], k=60, weights=[2.0, 1.0]))
+    assert fused[1] == pytest.approx(2 / 61 + 1 / 62)
+    assert fused[2] == pytest.approx(2 / 62 + 1 / 61)
+    assert fused[1] > fused[2]
+    with pytest.raises(ValueError):
+        rrf_fuse([[1]], weights=[1.0, 2.0])
+
+
+def test_retriever_weights_shift_hybrid_towards_one_side(index_dir):
+    index = Index.load(index_dir)
+    q = "Что считается удалёнкой по закону?"
+    dense_top = Retriever(index, HashEmbedder()).search(q, top_k=1, mode="dense")[0].chunk.chunk_id
+    heavy_dense = Retriever(index, HashEmbedder(), bm25_weight=0.0001, dense_weight=1.0)
+    assert heavy_dense.search(q, top_k=1)[0].chunk.chunk_id == dense_top
