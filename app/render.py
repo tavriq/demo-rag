@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 
+from app.fmt import dec, num, pct, plural_ru
 from app.llm import ARTICLE_NUMBER_RE, CITATION_RE
 
 _ANCHOR_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -44,15 +45,11 @@ def render_answer_html(text: str, article_anchors: dict[str, str]) -> str:
 
 
 def _pct(value) -> str:
-    if value is None:
-        return "—"
-    return f"{value * 100:.1f}%"
+    return pct(value)
 
 
 def _num(value, digits: int = 3) -> str:
-    if value is None:
-        return "—"
-    return f"{value:.{digits}f}"
+    return dec(value, digits)
 
 
 _PAGE_HEAD = """<!doctype html>
@@ -89,31 +86,39 @@ def render_evals_page(latest: dict | None) -> str:
     corpus = latest.get("corpus", {})
     evals = latest.get("evals", {})
     config = latest.get("config", {})
+    n_docs = corpus.get("n_docs") or 0
+    split = evals.get("split", "all")
+    split_note = "" if split == "all" else f" Только часть набора: <strong>{esc(split)}</strong>."
+    if evals.get("limit"):
+        split_note += f" Только первые {esc(evals.get('limit'))} вопросов."
     out.append(
-        '<p class="lead">Прогон от <strong>{date}</strong>. Корпус: {docs} статей, {chunks} чанков '
+        '<p class="lead">Прогон от <strong>{date}</strong>. Корпус: {docs} {docs_word}, {chunks} фрагментов '
         "(<code>{cpath}</code>). Вопросов: {total}, из них с ожидаемой статьёй {pos}, "
-        "без ответа в базе (negative) {neg}.</p>".format(
+        "без ответа в базе (negative) {neg}.{split_note}</p>".format(
             date=esc(latest.get("date")),
-            docs=esc(corpus.get("n_docs")),
+            docs=esc(n_docs),
+            docs_word=plural_ru(n_docs, "статья", "статьи", "статей"),
             chunks=esc(corpus.get("n_chunks")),
             cpath=esc(corpus.get("path")),
             total=esc(evals.get("n_total")),
             pos=esc(evals.get("n_positive")),
             neg=esc(evals.get("n_negative")),
+            split_note=split_note,
         )
     )
     out.append(
-        "<p class=\"muted\">Чанк до {chunk} символов. Эмбеддинги: <code>{model}</code>, top-k {k}, кандидатов на ретривер {cand}, "
-        "RRF k={rrf}, веса BM25/dense {wb}/{wd}. Платформа прогона: {plat}. "
-        "Negative-вопросы в hit@k не входят.</p>".format(
+        "<p class=\"muted\">Фрагмент до {chunk} символов. Эмбеддинги: <code>{model}</code>, в модель уходит {k} "
+        "фрагментов, кандидатов на ретривер {cand}, RRF k={rrf}, веса BM25 : dense {wb} : {wd}. "
+        "Платформа прогона: {plat}. Negative-вопросы в hit@k не входят. Статья засчитывается по лучшему "
+        "из своих фрагментов; hit@5 — нужная статья среди первых пяти разных статей.</p>".format(
             plat=esc((latest.get("runtime") or {}).get("platform", "—")),
             chunk=esc(config.get("chunk_max_chars")),
             model=esc(config.get("embedding_model")),
             k=esc(config.get("top_k")),
             cand=esc(config.get("candidates")),
             rrf=esc(config.get("rrf_k")),
-            wb=esc(config.get("bm25_weight", 1.0)),
-            wd=esc(config.get("dense_weight", 1.0)),
+            wb=esc(num(config.get("bm25_weight", 1.0))),
+            wd=esc(num(config.get("dense_weight", 1.0))),
         )
     )
 
@@ -170,6 +175,28 @@ def render_evals_page(latest: dict | None) -> str:
             )
         out.append("</tbody></table></div>")
 
+    ctx = retrieval.get("context")
+    multi = retrieval.get("multi_article")
+    if ctx or (multi and multi.get("n")):
+        out.append("<h3>Что реально получает модель</h3><ul>")
+        if ctx:
+            out.append(
+                "<li>Нужная статья среди {k} фрагментов, которые уходят в модель: <strong>{hit}</strong> "
+                "(n={n}). Эти фрагменты покрывают в среднем {avg} разных статей, минимум {mn}.</li>".format(
+                    k=esc(ctx.get("top_k")), hit=_pct(ctx.get("hit")), n=esc(ctx.get("n")),
+                    avg=esc(_num(ctx.get("distinct_articles_avg"), 1)), mn=esc(ctx.get("distinct_articles_min")),
+                )
+            )
+        if multi and multi.get("n"):
+            out.append(
+                "<li>Вопросы на две статьи (n={n}): хотя бы одна в top-5 статей — {any5}, обе в top-5 статей — "
+                "<strong>{all5}</strong>, обе среди фрагментов для модели — <strong>{allctx}</strong>.</li>".format(
+                    n=esc(multi.get("n")), any5=_pct(multi.get("any@5")), all5=_pct(multi.get("all@5")),
+                    allctx=_pct(multi.get("all_in_context")),
+                )
+            )
+        out.append("</ul>")
+
     misses = retrieval.get("misses") or []
     if misses:
         out.append(f"<details><summary>Промахи гибрида в top-5 ({len(misses)})</summary><ul class=\"misses\">")
@@ -182,6 +209,25 @@ def render_evals_page(latest: dict | None) -> str:
                 )
             )
         out.append("</ul></details>")
+
+    spots = latest.get("spot_checks") or []
+    if spots:
+        out.append("<h2>Точечные проверки</h2>")
+        out.append(
+            '<p class="muted">Не входят в метрики: примеры со страницы и из README, запросы по номеру статьи. '
+            "Ранг нужной статьи; «—» — нет в top-10.</p>"
+        )
+        out.append('<div class="table-scroll"><table><thead><tr><th>Запрос</th><th>Тип</th><th>Ожидалась</th>'
+                   "<th>BM25</th><th>dense</th><th>гибрид</th></tr></thead><tbody>")
+        for row in spots:
+            r = row.get("rank") or {}
+            out.append(
+                "<tr><td>{q}</td><td>{t}</td><td>{e}</td><td>{b}</td><td>{d}</td><td>{h}</td></tr>".format(
+                    q=esc(row.get("q")), t=esc(row.get("type")), e=esc(row.get("expected_id")),
+                    b=esc(r.get("bm25") or "—"), d=esc(r.get("dense") or "—"), h=esc(r.get("hybrid") or "—"),
+                )
+            )
+        out.append("</tbody></table></div>")
 
     answers = latest.get("answers") or {}
     out.append("<h2>Ответы модели</h2>")

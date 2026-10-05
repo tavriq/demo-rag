@@ -37,7 +37,7 @@ NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
 
 
 def _run(retriever, **kwargs):
-    items = load_evals(EVALS)
+    items = load_evals(EVALS)[: kwargs.get("limit")]
     params = dict(evals_path=str(EVALS), top_k=5, candidates=30, rrf_k=60, answers=False, generator=None,
                   max_usd=0.5, now=NOW)
     params.update(kwargs)
@@ -91,10 +91,64 @@ def test_report_files_written(retriever, tmp_path):
     _, report = _run(retriever)
     paths = write_report(report, tmp_path)
     names = sorted(p.name for p in paths)
-    assert names == ["latest.json", "latest.md", "results-2026-10-05.json"]
+    platform_slug = report["runtime"]["platform"].lower().replace(" ", "-").replace("_", "-")
+    assert names == [f"2026-10-05T120000Z-all-{platform_slug}.json", "latest.json", "latest.md"]
+    assert (tmp_path / "runs" / names[0]).exists()
     assert json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))["date"] == "2026-10-05"
     md = (tmp_path / "latest.md").read_text(encoding="utf-8")
     assert "| hybrid |" in md and "2026-10-05" in md
+
+
+def test_partial_runs_do_not_overwrite_latest(retriever, tmp_path):
+    _, full = _run(retriever)
+    write_report(full, tmp_path)
+    before = (tmp_path / "latest.json").read_text(encoding="utf-8")
+    items = select_split(load_evals(EVALS), "dev")
+    dev = run(retriever, items, evals_path=str(EVALS), top_k=5, candidates=30, rrf_k=60, answers=False,
+              generator=None, max_usd=0.5, now=datetime(2026, 10, 5, 13, 0, tzinfo=timezone.utc), split="dev")
+    paths = write_report(dev, tmp_path)
+    assert [p.name for p in paths] == [paths[0].name] and "-dev-" in paths[0].name
+    _, limited = _run(retriever, limit=3, now=datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc))
+    assert "limit3" in write_report(limited, tmp_path)[0].name
+    assert (tmp_path / "latest.json").read_text(encoding="utf-8") == before
+    assert len(list((tmp_path / "runs").glob("*.json"))) == 3
+
+
+def test_context_and_multi_article_metrics(retriever):
+    _, report = _run(retriever)
+    r = report["retrieval"]
+    assert r["context"]["top_k"] == 5 and r["context"]["n"] == r["hybrid"]["n"]
+    assert 1 <= r["context"]["distinct_articles_min"] <= r["context"]["distinct_articles_avg"] <= 5
+    # fragments sent to the model can only cover fewer articles than the top-5 articles
+    assert r["context"]["hit"] <= r["hybrid"]["hit@5"]
+    assert len(r["items"]) == r["hybrid"]["n"]
+    assert set(r["items"][0]["rank"]) == {"bm25", "dense", "hybrid"}
+    md = render_markdown(report)
+    assert "фрагментов, которые уходят в модель" in md
+
+
+def test_all_found_for_multi_article_questions():
+    from app.metrics import all_found
+
+    assert all_found(["TK-80", "TK-81"], ["TK-81", "TK-80"])
+    assert not all_found(["TK-80", "TK-3"], ["TK-81", "TK-80"])
+
+
+def test_spot_checks_are_reported(retriever):
+    spots = [{"q": "ежегодный оплачиваемый отпуск", "expected_id": "TK-115", "type": "ui_example"}]
+    _, report = _run(retriever, spot_checks=spots)
+    row = report["spot_checks"][0]
+    assert row["expected_id"] == "TK-115" and set(row["rank"]) == {"bm25", "dense", "hybrid"}
+    assert row["ok"] == (row["rank"]["hybrid"] == 1)
+    assert "Точечные проверки" in render_markdown(report)
+
+
+def test_answer_run_checks_worst_case_before_the_call(retriever, fake_client_factory):
+    fake = fake_client_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
+    _, report = _run(retriever, answers=True, generator=gen, max_usd=0.001)  # below one worst case
+    assert report["answers"]["status"] == "partial" and report["answers"]["n"] == 0
+    assert fake.messages.calls == []
 
 
 def test_split_is_stratified_deterministic_and_order_independent():

@@ -14,6 +14,11 @@ def first_relevant_rank(ranked_ids: list[str], expected_ids: list[str]) -> int |
     return None
 
 
+def all_found(found_ids: list[str], expected_ids: list[str]) -> bool:
+    """Every expected id is present (multi-article questions need all of them)."""
+    return set(expected_ids) <= set(found_ids)
+
+
 def hit_at_k(ranks: list[int | None], k: int) -> float | None:
     if not ranks:
         return None

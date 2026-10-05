@@ -50,10 +50,43 @@ def test_evals_page_escapes_file_content():
     assert "<script>bad()" not in page and "&lt;script&gt;bad()" in page
     assert "<b>q</b>" not in page
     assert "Не прогонялось: нужен ключ &lt;API&gt;" in page
-    assert "100.0%" in page
+    assert "100,0%" in page and "100.0%" not in page
     assert "Гибрид на dev и test" in page and "<i>test</i>" not in page
+    assert "1 статья," in page
+
+
+def test_evals_page_shows_partial_split_and_spot_checks():
+    latest = {
+        "date": "2026-10-05",
+        "corpus": {"path": "c", "n_docs": 534, "n_chunks": 3200},
+        "evals": {"n_total": 22, "n_positive": 22, "n_negative": 0, "split": "dev"},
+        "config": {"embedding_model": "m", "top_k": 5, "bm25_weight": 1.0, "dense_weight": 1.5},
+        "retrieval": {
+            "context": {"top_k": 5, "n": 22, "hit": 0.75, "distinct_articles_avg": 3.5, "distinct_articles_min": 1},
+            "multi_article": {"n": 4, "any@5": 0.75, "all@5": 0.25, "all_in_context": 0.0},
+        },
+        "spot_checks": [{"q": "<статья 1>", "type": "by_number", "expected_id": "TK-1",
+                         "rank": {"bm25": 1, "dense": None, "hybrid": None}}],
+        "answers": {"status": "not_run", "reason": "x"},
+    }
+    page = render_evals_page(latest)
+    assert "534 статьи" in page and "Только часть набора: <strong>dev</strong>" in page
+    assert "1 : 1,5" in page
+    assert "75,0%" in page and "3,5" in page
+    assert "&lt;статья 1&gt;" in page and "Точечные проверки" in page
 
 
 def test_evals_page_without_runs():
     page = render_evals_page(None)
     assert "Прогонов ещё не было" in page
+
+
+def test_russian_number_formatting():
+    from app.fmt import dec, num, pct, plural_ru
+
+    assert [plural_ru(n, "статья", "статьи", "статей") for n in (1, 3, 5, 11, 21, 534, 112)] == [
+        "статья", "статьи", "статей", "статей", "статья", "статьи", "статей"
+    ]
+    assert pct(0.8139) == "81,4%" and pct(None) == "—"
+    assert dec(0.6734) == "0,673"
+    assert num(1.5) == "1,5" and num(1.0) == "1"

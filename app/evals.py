@@ -4,9 +4,14 @@
 
 Retrieval metrics (hit@1/3/5, MRR@10) need no LLM and compare BM25, dense
 and hybrid on the same questions; negative questions are excluded from them.
+Two stricter numbers show what the model actually gets: hit among the TOP_K
+fragments sent to it, and for multi_hop questions whether both articles are found.
 ``--answers`` also asks the model (needs ANTHROPIC_API_KEY) and measures
 citation accuracy, refusals on negative questions, cost and latency.
-Writes evals/results-<date>.json, evals/latest.json and evals/latest.md.
+
+Every run is saved as evals/runs/<UTC time>-<split>-<platform>.json with
+per-question ranks. evals/latest.json and evals/latest.md (shown on /evals and
+quoted in README) are rewritten only by a full run: split "all", no --limit.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,9 +29,12 @@ import anthropic
 
 from app.config import Settings
 from app.embeddings import HashEmbedder, make_embedder
+from app.examples import SPOT_CHECKS_PATH, load_spot_checks
+from app.fmt import dec, num, pct, plural_ru
 from app.index import Index
-from app.llm import ClaudeGenerator, Generator
-from app.metrics import first_relevant_rank, is_negative, percentile, rate, retrieval_summary
+from app.llm import SYSTEM_PROMPT, ClaudeGenerator, Generator, build_user_message
+from app.metrics import all_found, first_relevant_rank, is_negative, percentile, rate, retrieval_summary
+from app.pricing import estimate_max_cost
 from app.retrieval import MODES, Retriever
 
 RANK_DEPTH = 10
@@ -87,40 +96,93 @@ def select_split(items: list[dict], split: str) -> list[dict]:
     return items if split == "all" else [it for it in items if it.get("split") == split]
 
 
-def run_retrieval(retriever: Retriever, items: list[dict]) -> dict:
+def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> dict:
     positives = [it for it in items if not is_negative(it)]
     result: dict = {}
-    hybrid_rows = []
-    for mode in MODES:
-        ranks = []
-        for item in positives:
-            ranked = retriever.rank_docs(item["q"], mode=mode, depth=RANK_DEPTH)
-            rank = first_relevant_rank(ranked, item["expected_ids"])
-            ranks.append(rank)
-            if mode == "hybrid":
-                hybrid_rows.append((item, rank, ranked))
-        result[mode] = retrieval_summary(ranks)
-
-    by_type: dict[str, list] = {}
-    by_split: dict[str, list] = {}
-    for item, rank, _ in hybrid_rows:
-        by_type.setdefault(item["type"], []).append(rank)
-        if item.get("split"):
-            by_split.setdefault(item["split"], []).append(rank)
-    result["hybrid_by_type"] = {t: retrieval_summary(r) for t, r in by_type.items()}
-    result["hybrid_by_split"] = {s: retrieval_summary(by_split[s]) for s in sorted(by_split)}
-    result["misses"] = [
-        {
+    per_item: list[dict] = []
+    for item in positives:
+        row = {
             "q": item["q"],
             "type": item["type"],
             "split": item.get("split"),
             "expected_ids": item["expected_ids"],
-            "top": ranked[:5],
+            "rank": {},
         }
-        for item, rank, ranked in hybrid_rows
-        if rank is None or rank > 5
+        for mode in MODES:
+            ranked = retriever.rank_docs(item["q"], mode=mode, depth=RANK_DEPTH)
+            row["rank"][mode] = first_relevant_rank(ranked, item["expected_ids"])
+            if mode == "hybrid":
+                row["hybrid_top10"] = ranked
+        # What the model actually receives: TOP_K fragments, several may come from one article.
+        context_docs: list[str] = []
+        for hit in retriever.search(item["q"], top_k=top_k):
+            if hit.chunk.doc_id not in context_docs:
+                context_docs.append(hit.chunk.doc_id)
+        row["context_docs"] = context_docs
+        per_item.append(row)
+
+    for mode in MODES:
+        result[mode] = retrieval_summary([row["rank"][mode] for row in per_item])
+
+    by_type: dict[str, list] = {}
+    by_split: dict[str, list] = {}
+    for row in per_item:
+        by_type.setdefault(row["type"], []).append(row["rank"]["hybrid"])
+        if row.get("split"):
+            by_split.setdefault(row["split"], []).append(row["rank"]["hybrid"])
+    result["hybrid_by_type"] = {t: retrieval_summary(r) for t, r in by_type.items()}
+    result["hybrid_by_split"] = {s: retrieval_summary(by_split[s]) for s in sorted(by_split)}
+
+    distinct = [len(row["context_docs"]) for row in per_item]
+    result["context"] = {
+        "top_k": top_k,
+        "n": len(per_item),
+        "hit": rate([bool(set(row["context_docs"]) & set(row["expected_ids"])) for row in per_item]),
+        "distinct_articles_avg": sum(distinct) / len(distinct) if distinct else None,
+        "distinct_articles_min": min(distinct) if distinct else None,
+    }
+    multi = [row for row in per_item if len(row["expected_ids"]) > 1]
+    result["multi_article"] = {
+        "n": len(multi),
+        "any@5": rate([row["rank"]["hybrid"] is not None and row["rank"]["hybrid"] <= 5 for row in multi]),
+        "all@5": rate([all_found(row["hybrid_top10"][:5], row["expected_ids"]) for row in multi]),
+        "all_in_context": rate([all_found(row["context_docs"], row["expected_ids"]) for row in multi]),
+    }
+    result["misses"] = [
+        {
+            "q": row["q"],
+            "type": row["type"],
+            "split": row["split"],
+            "expected_ids": row["expected_ids"],
+            "top": row["hybrid_top10"][:5],
+        }
+        for row in per_item
+        if row["rank"]["hybrid"] is None or row["rank"]["hybrid"] > 5
     ]
+    result["items"] = per_item
     return result
+
+
+def run_spot_checks(retriever: Retriever, rows: list[dict]) -> list[dict]:
+    """Single queries outside the eval set: page examples and "статья N" lookups."""
+    out = []
+    for row in rows:
+        ranks = {}
+        for mode in MODES:
+            ranked = retriever.rank_docs(row["q"], mode=mode, depth=RANK_DEPTH)
+            ranks[mode] = first_relevant_rank(ranked, [row["expected_id"]])
+        top_fragment = retriever.search(row["q"], top_k=1)
+        out.append(
+            {
+                "q": row["q"],
+                "type": row["type"],
+                "expected_id": row["expected_id"],
+                "rank": ranks,
+                "top_fragment_doc": top_fragment[0].chunk.doc_id if top_fragment else None,
+                "ok": ranks["hybrid"] == 1,
+            }
+        )
+    return out
 
 
 def run_answers(
@@ -135,11 +197,14 @@ def run_answers(
     errors: list[dict] = []
     total_cost = 0.0
     status, reason = "ok", None
+    max_tokens = getattr(generator, "max_tokens", 0)
     for item in items:
-        if total_cost >= max_usd:
+        hits = retriever.search(item["q"], top_k=top_k)
+        # Stop before a call whose worst case would cross the cap, not after the cap is crossed.
+        prompt_chars = len(SYSTEM_PROMPT) + len(build_user_message(item["q"], hits))
+        if total_cost + estimate_max_cost(generator.model, prompt_chars, max_tokens) > max_usd:
             status, reason = "partial", f"остановлено по лимиту ${max_usd:.2f} на прогон"
             break
-        hits = retriever.search(item["q"], top_k=top_k)
         retrieved_ids = {h.chunk.doc_id for h in hits}
         try:
             answer = generator.generate(item["q"], hits)
@@ -152,6 +217,7 @@ def run_answers(
             {
                 "q": item["q"],
                 "type": item["type"],
+                "split": item.get("split"),
                 "expected_ids": item["expected_ids"],
                 "negative": is_negative(item),
                 "cited_ids": cited_ids,
@@ -189,10 +255,6 @@ def run_answers(
     }
 
 
-def _fmt_pct(v) -> str:
-    return "—" if v is None else f"{v * 100:.1f}%"
-
-
 def _runtime_note(report: dict) -> str:
     rt = report.get("runtime") or {}
     if not rt:
@@ -202,33 +264,41 @@ def _runtime_note(report: dict) -> str:
 
 def _split_note(report: dict) -> str:
     split = report["evals"].get("split", "all")
-    return "" if split == "all" else f", только часть `{split}`"
+    note = "" if split == "all" else f", только часть `{split}`"
+    if report["evals"].get("limit"):
+        note += f", только первые {report['evals']['limit']}"
+    return note
+
+
+def _row(name: str, m: dict) -> str:
+    return (
+        f"| {name} | {m['n']} | {pct(m['hit@1'])} | {pct(m['hit@3'])} | {pct(m['hit@5'])} | {dec(m['mrr@10'])} |"
+    )
 
 
 def render_markdown(report: dict) -> str:
+    corpus, evals, config = report["corpus"], report["evals"], report["config"]
+    n_docs = corpus["n_docs"] or 0
     lines = [
         f"# Evals — {report['date']}",
         "",
-        f"Корпус: `{report['corpus']['path']}` — {report['corpus']['n_docs']} статей, "
-        f"{report['corpus']['n_chunks']} чанков. Вопросы: `{report['evals']['path']}` — "
-        f"{report['evals']['n_total']} (с ответом {report['evals']['n_positive']}, "
-        f"negative {report['evals']['n_negative']})" + _split_note(report) + ".",
-        f"Чанк до {report['config'].get('chunk_max_chars')} символов. Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}, "
-        f"RRF k={report['config']['rrf_k']}, веса BM25/dense {report['config'].get('bm25_weight', 1.0)}"
-        f"/{report['config'].get('dense_weight', 1.0)}." + _runtime_note(report),
+        f"Корпус: `{corpus['path']}` — {n_docs} {plural_ru(n_docs, 'статья', 'статьи', 'статей')}, "
+        f"{corpus['n_chunks']} фрагментов. Вопросы: `{evals['path']}` — "
+        f"{evals['n_total']} (с ответом {evals['n_positive']}, negative {evals['n_negative']})"
+        + _split_note(report) + ".",
+        f"Фрагмент до {config.get('chunk_max_chars')} символов. Эмбеддинги: `{config['embedding_model']}`, "
+        f"в модель уходит {config['top_k']} фрагментов, RRF k={config['rrf_k']}, веса BM25 : dense "
+        f"{num(config.get('bm25_weight', 1.0))} : {num(config.get('dense_weight', 1.0))}." + _runtime_note(report),
         "",
         "## Поиск (без LLM, negative не учитываются)",
+        "",
+        "Статья засчитывается по лучшему из своих фрагментов; hit@5 — нужная статья среди первых пяти разных статей.",
         "",
         "| Режим | n | hit@1 | hit@3 | hit@5 | MRR@10 |",
         "|---|---|---|---|---|---|",
     ]
     for mode in MODES:
-        m = report["retrieval"][mode]
-        mrr = "—" if m["mrr@10"] is None else f"{m['mrr@10']:.3f}"
-        lines.append(
-            f"| {mode} | {m['n']} | {_fmt_pct(m['hit@1'])} | {_fmt_pct(m['hit@3'])} | "
-            f"{_fmt_pct(m['hit@5'])} | {mrr} |"
-        )
+        lines.append(_row(mode, report["retrieval"][mode]))
     by_split = report["retrieval"].get("hybrid_by_split") or {}
     if len(by_split) > 1:
         lines += [
@@ -239,22 +309,52 @@ def render_markdown(report: dict) -> str:
             "|---|---|---|---|---|---|",
         ]
         for name, m in by_split.items():
-            mrr = "—" if m["mrr@10"] is None else f"{m['mrr@10']:.3f}"
+            lines.append(_row(name, m))
+    ctx = report["retrieval"].get("context")
+    multi = report["retrieval"].get("multi_article")
+    if ctx:
+        lines += [
+            "",
+            "Что реально получает модель (гибрид):",
+            "",
+            f"- Нужная статья среди {ctx['top_k']} фрагментов, которые уходят в модель: {pct(ctx['hit'])} "
+            f"(n={ctx['n']}). Эти {ctx['top_k']} фрагментов покрывают в среднем {dec(ctx['distinct_articles_avg'], 1)} "
+            f"разных статей, минимум {ctx['distinct_articles_min']}.",
+        ]
+    if multi and multi["n"]:
+        lines.append(
+            f"- Вопросы на две статьи (n={multi['n']}): хотя бы одна в top-5 статей — {pct(multi['any@5'])}, "
+            f"обе в top-5 статей — {pct(multi['all@5'])}, обе среди фрагментов для модели — "
+            f"{pct(multi['all_in_context'])}."
+        )
+    spots = report.get("spot_checks") or []
+    if spots:
+        lines += [
+            "",
+            "## Точечные проверки (не входят в метрики)",
+            "",
+            "Примеры со страницы и из README, запросы по номеру статьи. Ранг статьи; «—» — нет в top-10.",
+            "",
+            "| Запрос | Тип | Ожидалась | BM25 | dense | гибрид |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in spots:
+            r = row["rank"]
             lines.append(
-                f"| {name} | {m['n']} | {_fmt_pct(m['hit@1'])} | {_fmt_pct(m['hit@3'])} | "
-                f"{_fmt_pct(m['hit@5'])} | {mrr} |"
+                f"| {row['q']} | {row['type']} | {row['expected_id']} | {r['bm25'] or '—'} | "
+                f"{r['dense'] or '—'} | {r['hybrid'] or '—'} |"
             )
     lines += ["", "## Ответы модели", ""]
     a = report["answers"]
     if a.get("status") in ("ok", "partial"):
         avg_cost = "—" if a["avg_cost_usd"] is None else f"${a['avg_cost_usd']:.5f}"
-        avg_lat = "—" if a["avg_latency_s"] is None else f"{a['avg_latency_s']:.2f} с"
+        avg_lat = "—" if a["avg_latency_s"] is None else f"{dec(a['avg_latency_s'], 2)} с"
         lines += [
             f"- Модель: `{a['model']}`, вопросов: {a['n']}" + (f" (неполный: {a['reason']})" if a["reason"] else ""),
-            f"- Цитата попадает в ожидаемую статью: {_fmt_pct(a['citation_hit_rate'])}",
-            f"- Все цитаты ведут на найденные фрагменты: {_fmt_pct(a['citation_valid_rate'])}",
-            f"- Ложный отказ на вопросах с ответом: {_fmt_pct(a['false_no_answer_rate'])}",
-            f"- Корректный отказ на negative: {_fmt_pct(a['negative_refusal_rate'])}",
+            f"- Цитата попадает в ожидаемую статью: {pct(a['citation_hit_rate'])}",
+            f"- Все цитаты ведут на найденные фрагменты: {pct(a['citation_valid_rate'])}",
+            f"- Ложный отказ на вопросах с ответом: {pct(a['false_no_answer_rate'])}",
+            f"- Корректный отказ на negative: {pct(a['negative_refusal_rate'])}",
             f"- Средняя стоимость: {avg_cost}, всего ${a['total_cost_usd']:.4f}",
             f"- Средняя латентность: {avg_lat}",
         ]
@@ -263,14 +363,38 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def run_file_name(report: dict) -> str:
+    stamp = report["generated_at"].replace("+00:00", "Z").replace(":", "")
+    parts = [stamp, report["evals"].get("split", "all")]
+    if report["evals"].get("limit"):
+        parts.append(f"limit{report['evals']['limit']}")
+    if report["answers"].get("status") in ("ok", "partial"):
+        parts.append("answers")
+    parts.append(_slug((report.get("runtime") or {}).get("platform") or "unknown"))
+    return "-".join(parts) + ".json"
+
+
+def is_full_run(report: dict) -> bool:
+    return report["evals"].get("split", "all") == "all" and not report["evals"].get("limit")
+
+
 def write_report(report: dict, out_dir: str | Path) -> list[Path]:
+    """Always save the run under runs/; rewrite latest.* only for a full run."""
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = out_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, ensure_ascii=False, indent=2)
-    paths = [out_dir / f"results-{report['date']}.json", out_dir / "latest.json", out_dir / "latest.md"]
-    paths[0].write_text(payload, encoding="utf-8")
-    paths[1].write_text(payload, encoding="utf-8")
-    paths[2].write_text(render_markdown(report), encoding="utf-8")
+    run_path = runs_dir / run_file_name(report)
+    run_path.write_text(payload, encoding="utf-8")
+    paths = [run_path]
+    if is_full_run(report):
+        (out_dir / "latest.json").write_text(payload, encoding="utf-8")
+        (out_dir / "latest.md").write_text(render_markdown(report), encoding="utf-8")
+        paths += [out_dir / "latest.json", out_dir / "latest.md"]
     return paths
 
 
@@ -287,6 +411,8 @@ def run(
     max_usd: float,
     now: datetime | None = None,
     split: str = "all",
+    limit: int | None = None,
+    spot_checks: list[dict] | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     meta = retriever.index.meta
@@ -306,6 +432,7 @@ def run(
         "evals": {
             "path": evals_path,
             "split": split,
+            "limit": limit,
             "n_total": len(items),
             "n_positive": len(items) - len(negatives),
             "n_negative": len(negatives),
@@ -321,7 +448,8 @@ def run(
             "dense_weight": retriever.dense_weight,
         },
         "runtime": runtime_info(),
-        "retrieval": run_retrieval(retriever, items),
+        "retrieval": run_retrieval(retriever, items, top_k=top_k),
+        "spot_checks": run_spot_checks(retriever, spot_checks or []),
     }
     if not answers:
         report["answers"] = {"status": "not_run", "reason": "не запрашивалось (запуск без --answers)"}
@@ -345,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--split", choices=SPLITS, default="all", help="dev (for tuning), test (held out) or all (default)"
     )
+    parser.add_argument("--spot-checks", default=str(SPOT_CHECKS_PATH), help="page examples and lookups by number")
     args = parser.parse_args(argv)
 
     index = Index.load(args.index)
@@ -378,9 +507,13 @@ def main(argv: list[str] | None = None) -> int:
         generator=generator,
         max_usd=args.max_usd,
         split=args.split,
+        limit=args.limit,
+        spot_checks=load_spot_checks(args.spot_checks),
     )
     for path in write_report(report, args.out):
         print(f"written {path}")
+    if not is_full_run(report):
+        print("latest.* not touched: only a full run (split all, no --limit) updates them")
     print(render_markdown(report))
     return 0
 
