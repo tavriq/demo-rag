@@ -9,6 +9,11 @@ services:
       - "127.0.0.1:18101:8000"
     mem_limit: 700m
     cpus: 1.5
+    pids_limit: 128
+    # Root filesystem is read-only; state lives in the volume, scratch space in /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
     env_file:
       - path: .env
         required: false

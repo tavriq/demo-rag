@@ -1,6 +1,8 @@
-# Runtime dependencies, pinned. Tested with Python 3.12.
+# Direct runtime dependencies, pinned. Tested with Python 3.12.
+# The Docker image installs the full lock with hashes: requirements.lock.
 anthropic==1.11.0
 fastapi==0.142.2
+pydantic==2.13.5
 uvicorn==0.54.0
 onnxruntime==1.30.0
 numpy==2.5.3
