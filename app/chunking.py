@@ -1,6 +1,6 @@
 """Corpus loading and chunking.
 
-One chunk = one article. Articles longer than ``max_chars`` are split on
+One chunk = one article. Articles longer than ``max_chars`` (350 by default) are split on
 paragraph boundaries (then sentences, then words as a last resort); every part
 keeps the article header so a lone chunk still says which article it is from.
 """
@@ -47,12 +47,12 @@ class Chunk:
 
     @property
     def index_text(self) -> str:
-        """Text fed to BM25 and the embedder: header + chapter + body."""
-        parts = [self.header]
-        if self.chapter:
-            parts.append(self.chapter)
-        parts.append(self.body)
-        return "\n".join(parts)
+        """Text fed to BM25 and the embedder: article header + body.
+
+        The chapter name is shown in the UI but not indexed: on the dev split it
+        made short chunks of one chapter look alike (see evals/tuning.md).
+        """
+        return f"{self.header}\n{self.body}"
 
     def to_dict(self) -> dict:
         return asdict(self)

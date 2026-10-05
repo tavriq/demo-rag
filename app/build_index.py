@@ -11,7 +11,7 @@ from pathlib import Path
 from app.chunking import chunk_corpus, load_corpus
 from app.config import Settings
 from app.embeddings import HashEmbedder, make_embedder
-from app.index import build_index, file_sha256, read_meta
+from app.index import INDEX_VERSION, build_index, file_sha256, read_meta
 
 
 def peak_rss_mb() -> float:
@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_model = HashEmbedder.name if args.backend == "hash" else args.model
         if (
             meta
+            and meta.get("version") == INDEX_VERSION
             and meta.get("corpus_sha256") == file_sha256(corpus)
             and meta.get("embedding_model") == expected_model
             and meta.get("chunk_max_chars") == args.chunk_max_chars

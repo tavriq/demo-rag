@@ -57,11 +57,12 @@ def test_title_with_article_prefix_is_not_duplicated():
     assert chunk_article(art, 500)[0].header == "Статья 5. Заголовок"
 
 
-def test_chunk_index_text_contains_chapter(articles):
+def test_chunk_index_text_is_header_and_body(articles):
     chunks = chunk_corpus(articles, CHUNK_MAX)
     c = next(c for c in chunks if c.doc_id == "TK-108")
-    assert "Глава 18" in c.index_text
+    assert c.index_text == f"{c.header}\n{c.body}"
     assert c.index_text.startswith("Статья 108.")
+    assert "Глава 18" not in c.index_text
 
 
 def test_duplicate_ids_rejected(tmp_path):

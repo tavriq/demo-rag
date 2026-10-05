@@ -93,3 +93,24 @@ def test_retriever_weights_shift_hybrid_towards_one_side(index_dir):
     dense_top = Retriever(index, HashEmbedder()).search(q, top_k=1, mode="dense")[0].chunk.chunk_id
     heavy_dense = Retriever(index, HashEmbedder(), bm25_weight=0.0001, dense_weight=1.0)
     assert heavy_dense.search(q, top_k=1)[0].chunk.chunk_id == dense_top
+
+
+def test_build_index_if_missing_rebuilds_on_version_change(tmp_path, monkeypatch, capsys):
+    import json
+
+    from app import build_index as cli
+    from tests.conftest import CORPUS
+
+    monkeypatch.setenv("MODELS_DIR", str(tmp_path / "models"))
+    out = tmp_path / "idx"
+    args = ["--corpus", str(CORPUS), "--out", str(out), "--backend", "hash", "--chunk-max-chars", "600"]
+    assert cli.main(args) == 0
+    capsys.readouterr()
+    assert cli.main(args + ["--if-missing"]) == 0
+    assert "up to date" in capsys.readouterr().out  # skipped
+    meta = json.loads((out / "meta.json").read_text())
+    meta["version"] = 1
+    (out / "meta.json").write_text(json.dumps(meta))
+    assert cli.main(args + ["--if-missing"]) == 0
+    assert "index built" in capsys.readouterr().out
+    assert json.loads((out / "meta.json").read_text())["version"] != 1

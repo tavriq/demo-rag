@@ -22,7 +22,7 @@ from app.chunking import Chunk
 from app.embeddings import Embedder
 from app.text import tokenize
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2  # 2: index_text = header + body (chapter dropped)
 META_FILE = "meta.json"
 CHUNKS_FILE = "chunks.json"
 EMBEDDINGS_FILE = "embeddings.npy"
