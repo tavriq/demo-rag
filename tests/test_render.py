@@ -38,7 +38,8 @@ def test_evals_page_escapes_file_content():
         "config": {"embedding_model": "m", "top_k": 5},
         "retrieval": {
             "bm25": {"n": 1, "hit@1": 1.0, "hit@3": 1.0, "hit@5": 1.0, "mrr@10": 1.0},
-            "hybrid_by_split": {
+            "main_mode": "dense",
+            "main_by_split": {
                 "dev": {"n": 1, "hit@1": 0.0, "hit@5": 1.0, "mrr@10": 0.5},
                 "<i>test</i>": {"n": 1, "hit@1": 1.0, "hit@5": 1.0, "mrr@10": 1.0},
             },
@@ -51,7 +52,7 @@ def test_evals_page_escapes_file_content():
     assert "<b>q</b>" not in page
     assert "Не прогонялось: нужен ключ &lt;API&gt;" in page
     assert "100,0%" in page and "100.0%" not in page
-    assert "Гибрид на dev и test" in page and "<i>test</i>" not in page
+    assert "Dense (e5-small) на dev и test" in page and "<i>test</i>" not in page
     assert "1 статья," in page
 
 
@@ -74,6 +75,29 @@ def test_evals_page_shows_partial_split_and_spot_checks():
     assert "1 : 1,5" in page
     assert "75,0%" in page and "3,5" in page
     assert "&lt;статья 1&gt;" in page and "Точечные проверки" in page
+
+
+def test_evals_page_shows_live_answer_metrics_escaped():
+    latest = {
+        "date": "2026-10-05",
+        "corpus": {"path": "c", "n_docs": 534, "n_chunks": 3200},
+        "evals": {"n_total": 50, "n_positive": 43, "n_negative": 7},
+        "config": {"embedding_model": "m", "top_k": 5, "search_mode": "dense", "article_router": True},
+        "retrieval": {"main_mode": "dense"},
+        "answers": {
+            "status": "ok", "model": "<b>m</b>", "gateway": "api.example.ai", "reasoning_effort": None,
+            "n": 50, "n_positive": 43, "n_negative": 7, "citation_hit_rate": 0.8, "false_no_answer_rate": 0.05,
+            "negative_refusal_rate": 1.0, "uncited_answer_rate": 0.0, "citation_valid_rate": 1.0,
+            "avg_input_tokens": 1520.4, "avg_output_tokens": 140.2, "avg_reasoning_tokens": 0,
+            "total_tokens": 83000, "p50_latency_s": 1.5, "p95_latency_s": 3.25, "total_cost_rub": None,
+        },
+    }
+    page = render_evals_page(latest)
+    assert "<b>m</b>" not in page and "&lt;b&gt;m&lt;/b&gt;" in page
+    assert "шлюз api.example.ai" in page
+    assert "1,50 с / 3,25 с" in page and "83\u202f000" in page
+    assert "Режим поиска демо: <strong>Dense (e5-small)</strong>, роутер номеров статей включён" in page
+    assert "₽" not in page  # no prices configured: no rubles shown
 
 
 def test_evals_page_without_runs():

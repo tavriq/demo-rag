@@ -15,7 +15,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,9 +26,9 @@ from app.embeddings import make_embedder
 from app.examples import ui_examples
 from app.guard import CostGuard
 from app.index import Index
-from app.llm import SYSTEM_PROMPT, Generator, extract_citations, is_no_answer, make_generator
+from app.llm import SYSTEM_PROMPT, Generator, LLMError, extract_citations, is_no_answer, make_generator
 from app.netutil import client_ip, rate_limit_key
-from app.pricing import estimate_max_cost
+from app.pricing import Prices, estimate_max_tokens
 from app.render import anchor_for, render_answer_html, render_evals_page
 from app.retrieval import Retriever, SearchHit
 
@@ -123,6 +122,7 @@ def _fragment_json(hit: SearchHit) -> dict:
         "dense_rank": hit.dense_rank,
         "bm25_score": None if hit.bm25_score is None else round(hit.bm25_score, 3),
         "dense_score": None if hit.dense_score is None else round(hit.dense_score, 4),
+        "pinned": hit.pinned,
     }
 
 
@@ -154,6 +154,8 @@ def _load_retriever(settings: Settings) -> Retriever:
         rrf_k=settings.rrf_k,
         bm25_weight=settings.bm25_weight,
         dense_weight=settings.dense_weight,
+        mode=settings.search_mode,
+        article_router=settings.article_router,
     )
 
 
@@ -174,12 +176,14 @@ def create_app(
         except Exception as exc:  # the page must still open and explain what is missing
             index_error = f"{type(exc).__name__}: {exc}"
             log.error("index not loaded: %s", index_error)
-    generator = generator or make_generator(settings.llm_model, settings.max_tokens, settings.has_api_key)
+    generator = generator or make_generator(settings)
+    prices = Prices(settings.price_rub_per_1m_input, settings.price_rub_per_1m_output)
     guard = guard or CostGuard(
         settings.guard_db,
-        settings.daily_budget_usd,
+        settings.daily_token_budget,
         settings.rate_limit_per_hour,
-        global_paid_per_hour=settings.global_paid_per_hour,
+        hourly_token_budget=settings.hourly_token_budget,
+        prices=prices,
     )
     cache = cache or AnswerCache(settings.guard_db)
 
@@ -194,6 +198,8 @@ def create_app(
         {
             "model": generator.model,
             "max_tokens": settings.max_tokens,
+            "temperature": settings.llm_temperature,
+            "reasoning_effort": settings.llm_reasoning_effort,
             "system_prompt": SYSTEM_PROMPT,
             "corpus_sha256": index_meta.get("corpus_sha256"),
             "n_chunks": index_meta.get("n_chunks"),
@@ -202,6 +208,8 @@ def create_app(
             "candidates": settings.candidates,
             "rrf_k": settings.rrf_k,
             "weights": [settings.bm25_weight, settings.dense_weight],
+            "search_mode": settings.search_mode,
+            "article_router": settings.article_router,
         }
     )
     proxy_state = {"forwarded_for_ignored": False}
@@ -236,10 +244,11 @@ def create_app(
     def _top_k(requested: int | None) -> int:
         return min(requested or settings.top_k, settings.max_top_k)
 
-    def _estimate(question: str, top_k: int) -> float:
-        # Upper bound before retrieval: top_k longest fragments + escaped question + system prompt.
+    def _estimate(question: str, top_k: int) -> int:
+        # Upper bound before retrieval: top_k longest fragments + escaped question + system prompt
+        # + the full completion limit.
         prompt_chars = len(SYSTEM_PROMPT) + len(html.escape(question)) + 100 + top_k * max_fragment_chars
-        return estimate_max_cost(settings.llm_model, prompt_chars, settings.max_tokens)
+        return estimate_max_tokens(prompt_chars, settings.max_tokens)
 
     def answer_question(
         question: str, top_k: int, client_key: str | None, truncated: bool = False
@@ -254,7 +263,7 @@ def create_app(
         cache_key = AnswerCache.make_key(question, top_k, config_fingerprint) if live else None
         cached = cache.get(cache_key) if cache_key else None
         paid = live and cached is None
-        decision = guard.check_and_reserve(client_key, _estimate(question, top_k) if paid else 0.0, charge=paid)
+        decision = guard.check_and_reserve(client_key, _estimate(question, top_k) if paid else 0, charge=paid)
         if not decision.allowed and decision.code == "rate_limited":
             headers = {"Retry-After": str(decision.retry_after_s)} if decision.retry_after_s else None
             body = {"error": decision.code, "message": decision.message, "budget": guard.status()}
@@ -270,7 +279,8 @@ def create_app(
                 "answer": _answer_json(cached["text"], cached.get("stop_reason"), cached["fragments"]),
                 "fragments": cached["fragments"],
                 "usage": None,
-                "cost_usd": 0.0,
+                "tokens": 0,
+                "cost_rub": None,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "budget": guard.status(),
             }, None
@@ -286,10 +296,10 @@ def create_app(
 
         try:
             answer = generator.generate(question, hits)
-        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
-            # An error response is not billed: release the reservation. On a connection error or
-            # timeout the request may still have been processed, so the worst-case reservation stays.
-            if isinstance(exc, anthropic.APIStatusError) and decision.reservation_id is not None:
+        except LLMError as exc:
+            # A rejected request (4xx) is not billed: release the reservation. On 5xx, a connection
+            # error or a timeout the request may still have been processed, so the reservation stays.
+            if not exc.billed and decision.reservation_id is not None:
                 guard.release(decision.reservation_id)
             log.warning("generation failed: %s status=%s", type(exc).__name__, getattr(exc, "status_code", None))
             body = {
@@ -300,14 +310,11 @@ def create_app(
                 "budget": guard.status(),
             }
             return 502, body, None
-        if decision.reservation_id is not None:
-            guard.settle(
-                decision.reservation_id,
-                answer.cost_usd,
-                answer.usage.input_tokens if answer.usage else None,
-                answer.usage.output_tokens if answer.usage else None,
-            )
-        if cache_key and answer.stop_reason == "end_turn":
+        usage = answer.usage
+        # No usage in the response: the worst-case reservation stays instead of a zero.
+        if decision.reservation_id is not None and usage is not None and usage.total > 0:
+            guard.settle(decision.reservation_id, usage.input_tokens, usage.output_tokens)
+        if cache_key and answer.complete:
             cache.put(
                 cache_key,
                 {
@@ -315,13 +322,14 @@ def create_app(
                     "stop_reason": answer.stop_reason,
                     "fragments": fragments,
                     "model": generator.model,
-                    "cost_usd": answer.cost_usd,
+                    "tokens": usage.total if usage else 0,
                     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 },
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
         log.info(
-            "ask mode=%s hits=%d cost=%.6f latency_ms=%d", answer.mode, len(hits), answer.cost_usd, latency_ms
+            "ask mode=%s hits=%d tokens=%d latency_ms=%d",
+            answer.mode, len(hits), usage.total if usage else 0, latency_ms,
         )
         return 200, {
             **base,
@@ -331,9 +339,14 @@ def create_app(
             "answer": _answer_json(answer.text, answer.stop_reason, fragments),
             "fragments": fragments,
             "usage": None
-            if answer.usage is None
-            else {"input_tokens": answer.usage.input_tokens, "output_tokens": answer.usage.output_tokens},
-            "cost_usd": round(answer.cost_usd, 6),
+            if usage is None
+            else {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+            },
+            "tokens": usage.total if usage else 0,
+            "cost_rub": None if usage is None else prices.cost_rub(usage.input_tokens, usage.output_tokens),
             "latency_ms": latency_ms,
             "budget": guard.status(),
         }, None
@@ -361,6 +374,8 @@ def create_app(
             "budget": guard.status(),
             "max_question_chars": settings.max_question_chars,
             "top_k": settings.top_k,
+            "search_mode": settings.search_mode,
+            "article_router": settings.article_router,
             "cached_answers": len(cache),
             # True once a request came with X-Forwarded-For while TRUSTED_PROXY is empty: behind a
             # proxy that means every visitor shares one rate-limit bucket.

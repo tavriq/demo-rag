@@ -52,6 +52,10 @@ def _num(value, digits: int = 3) -> str:
     return dec(value, digits)
 
 
+def _tokens(value) -> str:
+    return "—" if value is None else esc(f"{value:,.0f}".replace(",", "\u202f"))
+
+
 _PAGE_HEAD = """<!doctype html>
 <html lang="ru">
 <head>
@@ -106,9 +110,14 @@ def render_evals_page(latest: dict | None) -> str:
             split_note=split_note,
         )
     )
+    retrieval = latest.get("retrieval", {})
+    main = retrieval.get("main_mode") or config.get("search_mode") or "hybrid"
+    labels = {"bm25": "BM25", "dense": "Dense (e5-small)", "hybrid": "Гибрид (RRF)"}
+    router = config.get("article_router")
     out.append(
         "<p class=\"muted\">Фрагмент до {chunk} символов. Эмбеддинги: <code>{model}</code>, в модель уходит {k} "
-        "фрагментов, кандидатов на ретривер {cand}, RRF k={rrf}, веса BM25 : dense {wb} : {wd}. "
+        "фрагментов, кандидатов на каждый поиск {cand}, RRF k={rrf}, веса BM25 : dense {wb} : {wd}. "
+        "Режим поиска демо: <strong>{main}</strong>{router}. "
         "Платформа прогона: {plat}. Negative-вопросы в hit@k не входят. Статья засчитывается по лучшему "
         "из своих фрагментов; hit@5 — нужная статья среди первых пяти разных статей.</p>".format(
             plat=esc((latest.get("runtime") or {}).get("platform", "—")),
@@ -119,21 +128,21 @@ def render_evals_page(latest: dict | None) -> str:
             rrf=esc(config.get("rrf_k")),
             wb=esc(num(config.get("bm25_weight", 1.0))),
             wd=esc(num(config.get("dense_weight", 1.0))),
+            main=esc(labels.get(main, main)),
+            router="" if router is None else (", роутер номеров статей " + ("включён" if router else "выключен")),
         )
     )
 
-    retrieval = latest.get("retrieval", {})
     out.append("<h2>Поиск (без LLM)</h2>")
     out.append('<div class="table-scroll"><table><thead><tr><th>Режим</th><th>n</th>'
                "<th>hit@1</th><th>hit@3</th><th>hit@5</th><th>MRR@10</th></tr></thead><tbody>")
-    labels = {"bm25": "BM25", "dense": "Dense", "hybrid": "Гибрид (RRF)"}
     for mode in ("bm25", "dense", "hybrid"):
         m = retrieval.get(mode)
         if not m:
             continue
         out.append(
             "<tr><td>{label}</td><td>{n}</td><td>{h1}</td><td>{h3}</td><td>{h5}</td><td>{mrr}</td></tr>".format(
-                label=esc(labels[mode]),
+                label=esc(labels[mode] + (", режим демо" if mode == main else "")),
                 n=esc(m.get("n")),
                 h1=_pct(m.get("hit@1")),
                 h3=_pct(m.get("hit@3")),
@@ -143,9 +152,10 @@ def render_evals_page(latest: dict | None) -> str:
         )
     out.append("</tbody></table></div>")
 
-    by_type = retrieval.get("hybrid_by_type") or {}
+    main_label = esc(labels.get(main, main))
+    by_type = retrieval.get("main_by_type") or {}
     if by_type:
-        out.append("<h3>Гибрид по типам вопросов</h3>")
+        out.append(f"<h3>{main_label} по типам вопросов</h3>")
         out.append('<div class="table-scroll"><table><thead><tr><th>Тип</th><th>n</th>'
                    "<th>hit@1</th><th>hit@5</th><th>MRR@10</th></tr></thead><tbody>")
         for qtype, m in sorted(by_type.items()):
@@ -157,12 +167,13 @@ def render_evals_page(latest: dict | None) -> str:
             )
         out.append("</tbody></table></div>")
 
-    by_split = retrieval.get("hybrid_by_split") or {}
+    by_split = retrieval.get("main_by_split") or {}
     if len(by_split) > 1:
-        out.append("<h3>Гибрид на dev и test</h3>")
+        out.append(f"<h3>{main_label} на dev и test</h3>")
         out.append(
-            '<p class="muted">Размер чанка и веса RRF подбирались только на dev; test в подборе не участвовал, '
-            "поэтому честная оценка — строка test. Протокол и все итерации — <code>evals/tuning.md</code>.</p>"
+            '<p class="muted">Размер фрагмента, веса и режим поиска выбирались только по dev; test в выборе не '
+            "участвовал, поэтому честная оценка — строка test. Протокол и все итерации — "
+            "<code>evals/tuning.md</code>.</p>"
         )
         out.append('<div class="table-scroll"><table><thead><tr><th>Часть</th><th>n</th>'
                    "<th>hit@1</th><th>hit@5</th><th>MRR@10</th></tr></thead><tbody>")
@@ -199,7 +210,7 @@ def render_evals_page(latest: dict | None) -> str:
 
     misses = retrieval.get("misses") or []
     if misses:
-        out.append(f"<details><summary>Промахи гибрида в top-5 ({len(misses)})</summary><ul class=\"misses\">")
+        out.append(f"<details><summary>Промахи режима демо в top-5 ({len(misses)})</summary><ul class=\"misses\">")
         for miss in misses:
             out.append(
                 "<li>{q} <span class=\"muted\">ожидалось {exp}, найдено {got}</span></li>".format(
@@ -215,7 +226,7 @@ def render_evals_page(latest: dict | None) -> str:
         out.append("<h2>Точечные проверки</h2>")
         out.append(
             '<p class="muted">Не входят в метрики: примеры со страницы и из README, запросы по номеру статьи. '
-            "Ранг нужной статьи; «—» — нет в top-10.</p>"
+            "Ранг нужной статьи; «—» — нет в top-10. Роутер номеров статей действует во всех трёх режимах.</p>"
         )
         out.append('<div class="table-scroll"><table><thead><tr><th>Запрос</th><th>Тип</th><th>Ожидалась</th>'
                    "<th>BM25</th><th>dense</th><th>гибрид</th></tr></thead><tbody>")
@@ -232,17 +243,32 @@ def render_evals_page(latest: dict | None) -> str:
     answers = latest.get("answers") or {}
     out.append("<h2>Ответы модели</h2>")
     if answers.get("status") in ("ok", "partial"):
+        model = esc(answers.get("model"))
+        if answers.get("reasoning_effort"):
+            model += f", reasoning_effort {esc(answers.get('reasoning_effort'))}"
+        if answers.get("gateway"):
+            model += f", шлюз {esc(answers.get('gateway'))}"
+        tokens = "вход {i}, выход {o}, из них рассуждения {r}".format(
+            i=_tokens(answers.get("avg_input_tokens")),
+            o=_tokens(answers.get("avg_output_tokens")),
+            r=_tokens(answers.get("avg_reasoning_tokens")),
+        )
         rows = [
-            ("Модель", esc(answers.get("model"))),
-            ("Вопросов прогнано", esc(answers.get("n"))),
-            ("Цитата попадает в ожидаемую статью", _pct(answers.get("citation_hit_rate"))),
-            ("Все цитаты ведут на найденные фрагменты", _pct(answers.get("citation_valid_rate"))),
-            ("Ложный отказ на вопросах с ответом", _pct(answers.get("false_no_answer_rate"))),
-            ("Корректный отказ на negative", _pct(answers.get("negative_refusal_rate"))),
-            ("Средняя стоимость ответа", "$" + _num(answers.get("avg_cost_usd"), 5)),
-            ("Средняя латентность", _num(answers.get("avg_latency_s"), 2) + " с"),
-            ("p95 латентности", _num(answers.get("p95_latency_s"), 2) + " с"),
+            ("Модель", model),
+            ("Вопросов", "{n} (с ответом в кодексе {p}, без ответа {g})".format(
+                n=esc(answers.get("n")), p=esc(answers.get("n_positive")), g=esc(answers.get("n_negative")))),
+            ("Ответ ссылается на ожидаемую статью", _pct(answers.get("citation_hit_rate"))),
+            ("Ложный отказ, хотя ответ в кодексе есть", _pct(answers.get("false_no_answer_rate"))),
+            ("Корректный отказ на вопросах без ответа", _pct(answers.get("negative_refusal_rate"))),
+            ("Ответы без единой ссылки (отказы не считаются)", _pct(answers.get("uncited_answer_rate"))),
+            ("Все ссылки ведут на полученные моделью фрагменты", _pct(answers.get("citation_valid_rate"))),
+            ("Токены на ответ в среднем", tokens),
+            ("Всего токенов за прогон", _tokens(answers.get("total_tokens"))),
+            ("Задержка ответа модели, p50 / p95", "{a} с / {b} с".format(
+                a=_num(answers.get("p50_latency_s"), 2), b=_num(answers.get("p95_latency_s"), 2))),
         ]
+        if answers.get("total_cost_rub") is not None:
+            rows.append(("Стоимость прогона", "≈ " + _num(answers.get("total_cost_rub"), 2) + " ₽"))
         out.append('<div class="table-scroll"><table><tbody>')
         for label, value in rows:
             out.append(f"<tr><th>{esc(label)}</th><td>{value}</td></tr>")
@@ -252,7 +278,7 @@ def render_evals_page(latest: dict | None) -> str:
     else:
         out.append(
             '<p class="notice">Не прогонялось: {reason}.</p>'.format(
-                reason=esc(answers.get("reason") or "нужен ключ ANTHROPIC_API_KEY")
+                reason=esc(answers.get("reason") or "нужен ключ API")
             )
         )
     out.append(_PAGE_TAIL)

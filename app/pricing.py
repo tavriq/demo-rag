@@ -1,8 +1,9 @@
-"""Model prices and cost accounting from API usage.
+"""Token estimates for the cost guard and optional prices in rubles.
 
-Prices are USD per 1M tokens from Anthropic's public price list
-(checked 2026-10-05): Claude Haiku 4.5 — input $1, output $5,
-5-minute cache write $1.25, cache read $0.10.
+The budget is counted in tokens: the gateway's prices are not known to this
+project, and a made-up price would make a made-up limit. If the operator knows
+the price, PRICE_RUB_PER_1M_INPUT and PRICE_RUB_PER_1M_OUTPUT turn the token
+counts into rubles for display; the limits stay in tokens either way.
 """
 
 from __future__ import annotations
@@ -10,50 +11,34 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+# Conservative pre-call estimate for Russian text: 2 characters per token.
+# Live runs compare it with usage.prompt_tokens (evals report, "estimate check").
+CHARS_PER_TOKEN_ESTIMATE = 2.0
+# Chat formatting around the system and user messages.
+PROMPT_OVERHEAD_TOKENS = 50
+
+
+def estimate_input_tokens(prompt_chars: int) -> int:
+    return math.ceil(prompt_chars / CHARS_PER_TOKEN_ESTIMATE) + PROMPT_OVERHEAD_TOKENS
+
+
+def estimate_max_tokens(prompt_chars: int, max_completion_tokens: int) -> int:
+    """Upper bound of one call: estimated input + the full completion limit (reasoning included)."""
+    return estimate_input_tokens(prompt_chars) + max_completion_tokens
+
 
 @dataclass(frozen=True)
-class Price:
-    input: float
-    output: float
-    cache_write: float
-    cache_read: float
+class Prices:
+    """Rubles per 1M tokens, set by the operator. None anywhere means "price unknown"."""
 
+    input_rub_per_1m: float | None = None
+    output_rub_per_1m: float | None = None
 
-PRICES_PER_MTOK: dict[str, Price] = {
-    "claude-haiku-4-5-20251001": Price(input=1.00, output=5.00, cache_write=1.25, cache_read=0.10),
-    "claude-haiku-4-5": Price(input=1.00, output=5.00, cache_write=1.25, cache_read=0.10),
-}
+    @property
+    def known(self) -> bool:
+        return self.input_rub_per_1m is not None and self.output_rub_per_1m is not None
 
-# Conservative pre-call estimate for Russian text: ~2 characters per token.
-# Real Cyrillic tokenization is usually denser, so the estimate over-reserves.
-CHARS_PER_TOKEN_ESTIMATE = 2.0
-
-
-def price_for(model: str) -> Price:
-    try:
-        return PRICES_PER_MTOK[model]
-    except KeyError as exc:
-        raise KeyError(f"no price configured for model {model!r}; add it to app/pricing.py") from exc
-
-
-def cost_usd(
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cache_creation_input_tokens: int = 0,
-    cache_read_input_tokens: int = 0,
-) -> float:
-    p = price_for(model)
-    total = (
-        input_tokens * p.input
-        + output_tokens * p.output
-        + cache_creation_input_tokens * p.cache_write
-        + cache_read_input_tokens * p.cache_read
-    )
-    return total / 1_000_000
-
-
-def estimate_max_cost(model: str, prompt_chars: int, max_tokens: int) -> float:
-    """Upper-bound cost of one call: estimated input + the full max_tokens of output."""
-    input_tokens = math.ceil(prompt_chars / CHARS_PER_TOKEN_ESTIMATE) + 50
-    return cost_usd(model, input_tokens, max_tokens)
+    def cost_rub(self, input_tokens: int, output_tokens: int) -> float | None:
+        if not self.known:
+            return None
+        return (input_tokens * self.input_rub_per_1m + output_tokens * self.output_rub_per_1m) / 1_000_000

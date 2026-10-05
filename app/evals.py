@@ -4,10 +4,11 @@
 
 Retrieval metrics (hit@1/3/5, MRR@10) need no LLM and compare BM25, dense
 and hybrid on the same questions; negative questions are excluded from them.
-Two stricter numbers show what the model actually gets: hit among the TOP_K
-fragments sent to it, and for multi_hop questions whether both articles are found.
-``--answers`` also asks the model (needs ANTHROPIC_API_KEY) and measures
-citation accuracy, refusals on negative questions, cost and latency.
+The demo's own mode (SEARCH_MODE) gets the breakdowns: by question type, by
+dev/test part, misses. Two stricter numbers show what the model actually gets:
+hit among the TOP_K fragments sent to it, and for multi_hop questions whether
+both articles are found. ``--answers`` also asks the model (needs LLM_API_KEY
+and LLM_BASE_URL) and measures citations, refusals, tokens and latency.
 
 Every run is saved as evals/runs/<UTC time>-<split>-<platform>.json with
 per-question ranks. evals/latest.json and evals/latest.md (shown on /evals and
@@ -25,16 +26,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
-
 from app.config import Settings
 from app.embeddings import HashEmbedder, make_embedder
 from app.examples import SPOT_CHECKS_PATH, load_spot_checks
 from app.fmt import dec, num, pct, plural_ru
 from app.index import Index
-from app.llm import SYSTEM_PROMPT, ClaudeGenerator, Generator, build_user_message
+from app.llm import SYSTEM_PROMPT, Generator, LLMError, build_user_message, gateway_host, make_generator
 from app.metrics import all_found, first_relevant_rank, is_negative, percentile, rate, retrieval_summary
-from app.pricing import estimate_max_cost
+from app.pricing import Prices, estimate_input_tokens, estimate_max_tokens
 from app.retrieval import MODES, Retriever
 
 RANK_DEPTH = 10
@@ -97,8 +96,10 @@ def select_split(items: list[dict], split: str) -> list[dict]:
 
 
 def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> dict:
+    """Ranks for every mode; breakdowns, misses and context metrics for the demo's mode."""
+    main = retriever.mode
     positives = [it for it in items if not is_negative(it)]
-    result: dict = {}
+    result: dict = {"main_mode": main}
     per_item: list[dict] = []
     for item in positives:
         row = {
@@ -111,8 +112,8 @@ def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> di
         for mode in MODES:
             ranked = retriever.rank_docs(item["q"], mode=mode, depth=RANK_DEPTH)
             row["rank"][mode] = first_relevant_rank(ranked, item["expected_ids"])
-            if mode == "hybrid":
-                row["hybrid_top10"] = ranked
+            if mode == main:
+                row["main_top10"] = ranked
         # What the model actually receives: TOP_K fragments, several may come from one article.
         context_docs: list[str] = []
         for hit in retriever.search(item["q"], top_k=top_k):
@@ -127,11 +128,11 @@ def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> di
     by_type: dict[str, list] = {}
     by_split: dict[str, list] = {}
     for row in per_item:
-        by_type.setdefault(row["type"], []).append(row["rank"]["hybrid"])
+        by_type.setdefault(row["type"], []).append(row["rank"][main])
         if row.get("split"):
-            by_split.setdefault(row["split"], []).append(row["rank"]["hybrid"])
-    result["hybrid_by_type"] = {t: retrieval_summary(r) for t, r in by_type.items()}
-    result["hybrid_by_split"] = {s: retrieval_summary(by_split[s]) for s in sorted(by_split)}
+            by_split.setdefault(row["split"], []).append(row["rank"][main])
+    result["main_by_type"] = {t: retrieval_summary(r) for t, r in by_type.items()}
+    result["main_by_split"] = {s: retrieval_summary(by_split[s]) for s in sorted(by_split)}
 
     distinct = [len(row["context_docs"]) for row in per_item]
     result["context"] = {
@@ -144,8 +145,8 @@ def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> di
     multi = [row for row in per_item if len(row["expected_ids"]) > 1]
     result["multi_article"] = {
         "n": len(multi),
-        "any@5": rate([row["rank"]["hybrid"] is not None and row["rank"]["hybrid"] <= 5 for row in multi]),
-        "all@5": rate([all_found(row["hybrid_top10"][:5], row["expected_ids"]) for row in multi]),
+        "any@5": rate([row["rank"][main] is not None and row["rank"][main] <= 5 for row in multi]),
+        "all@5": rate([all_found(row["main_top10"][:5], row["expected_ids"]) for row in multi]),
         "all_in_context": rate([all_found(row["context_docs"], row["expected_ids"]) for row in multi]),
     }
     result["misses"] = [
@@ -154,10 +155,10 @@ def run_retrieval(retriever: Retriever, items: list[dict], top_k: int = 5) -> di
             "type": row["type"],
             "split": row["split"],
             "expected_ids": row["expected_ids"],
-            "top": row["hybrid_top10"][:5],
+            "top": row["main_top10"][:5],
         }
         for row in per_item
-        if row["rank"]["hybrid"] is None or row["rank"]["hybrid"] > 5
+        if row["rank"][main] is None or row["rank"][main] > 5
     ]
     result["items"] = per_item
     return result
@@ -179,7 +180,8 @@ def run_spot_checks(retriever: Retriever, rows: list[dict]) -> list[dict]:
                 "expected_id": row["expected_id"],
                 "rank": ranks,
                 "top_fragment_doc": top_fragment[0].chunk.doc_id if top_fragment else None,
-                "ok": ranks["hybrid"] == 1,
+                "top_fragment_pinned": bool(top_fragment and top_fragment[0].pinned),
+                "ok": ranks[retriever.mode] == 1,
             }
         )
     return out
@@ -190,28 +192,31 @@ def run_answers(
     generator: Generator,
     items: list[dict],
     top_k: int,
-    max_usd: float,
+    max_run_tokens: int,
+    prices: Prices | None = None,
 ) -> dict:
+    """Ask the model every question; stop before a call whose worst case would cross ``max_run_tokens``."""
+    prices = prices or Prices()
     article_to_doc = retriever.index.article_to_doc_id()
     rows = []
     errors: list[dict] = []
-    total_cost = 0.0
+    total_tokens = 0
     status, reason = "ok", None
     max_tokens = getattr(generator, "max_tokens", 0)
     for item in items:
         hits = retriever.search(item["q"], top_k=top_k)
-        # Stop before a call whose worst case would cross the cap, not after the cap is crossed.
         prompt_chars = len(SYSTEM_PROMPT) + len(build_user_message(item["q"], hits))
-        if total_cost + estimate_max_cost(generator.model, prompt_chars, max_tokens) > max_usd:
-            status, reason = "partial", f"остановлено по лимиту ${max_usd:.2f} на прогон"
+        if total_tokens + estimate_max_tokens(prompt_chars, max_tokens) > max_run_tokens:
+            status, reason = "partial", f"остановлено по лимиту {max_run_tokens} токенов на прогон"
             break
         retrieved_ids = {h.chunk.doc_id for h in hits}
         try:
             answer = generator.generate(item["q"], hits)
-        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
-            errors.append({"q": item["q"], "error": type(exc).__name__})
+        except LLMError as exc:
+            errors.append({"q": item["q"], "error": type(exc).__name__, "status": getattr(exc, "status_code", None)})
             continue
-        total_cost += answer.cost_usd
+        usage = answer.usage
+        total_tokens += usage.total if usage else 0
         cited_ids = [article_to_doc.get(a, f"?{a}") for a in answer.citations]
         rows.append(
             {
@@ -219,12 +224,18 @@ def run_answers(
                 "type": item["type"],
                 "split": item.get("split"),
                 "expected_ids": item["expected_ids"],
+                "retrieved_ids": sorted(retrieved_ids),
                 "negative": is_negative(item),
                 "cited_ids": cited_ids,
                 "citation_hit": bool(set(cited_ids) & set(item["expected_ids"])),
                 "citations_valid": all(c in retrieved_ids for c in cited_ids),
                 "no_answer": answer.no_answer,
-                "cost_usd": answer.cost_usd,
+                "finish_reason": answer.stop_reason,
+                "complete": answer.complete,
+                "input_tokens": usage.input_tokens if usage else None,
+                "output_tokens": usage.output_tokens if usage else None,
+                "reasoning_tokens": usage.reasoning_tokens if usage else None,
+                "estimated_input_tokens": estimate_input_tokens(prompt_chars),
                 "latency_s": round(answer.latency_s, 3),
                 "answer": answer.text,
             }
@@ -234,21 +245,44 @@ def run_answers(
     pos = [r for r in rows if not r["negative"]]
     neg = [r for r in rows if r["negative"]]
     cited = [r for r in rows if r["cited_ids"]]
+    answered = [r for r in rows if not r["no_answer"]]
     latencies = [r["latency_s"] for r in rows]
+    with_usage = [r for r in rows if r["input_tokens"]]
+
+    def avg(key: str) -> float | None:
+        return sum(r[key] for r in with_usage) / len(with_usage) if with_usage else None
+
+    total_in = sum(r["input_tokens"] or 0 for r in rows)
+    total_out = sum(r["output_tokens"] or 0 for r in rows)
+    ratios = [r["input_tokens"] / r["estimated_input_tokens"] for r in with_usage]
     return {
         "status": status,
         "reason": reason,
         "model": generator.model,
+        "temperature": getattr(generator, "temperature", None),
+        "reasoning_effort": getattr(generator, "reasoning_effort", None),
+        "max_completion_tokens": max_tokens,
         "n": len(rows),
         "n_positive": len(pos),
         "n_negative": len(neg),
+        # the questions with an answer in the corpus
         "citation_hit_rate": rate([r["citation_hit"] for r in pos]),
-        "citation_valid_rate": rate([r["citations_valid"] for r in cited]),
         "false_no_answer_rate": rate([r["no_answer"] for r in pos]),
+        # the negative questions
         "negative_refusal_rate": rate([r["no_answer"] for r in neg]),
-        "total_cost_usd": round(total_cost, 6),
-        "avg_cost_usd": total_cost / len(rows) if rows else None,
+        # all answers
+        "citation_valid_rate": rate([r["citations_valid"] for r in cited]),
+        "uncited_answer_rate": rate([not r["cited_ids"] for r in answered]),
+        "n_answered": len(answered),
+        "incomplete_rate": rate([not r["complete"] for r in rows]),
+        "total_tokens": total_in + total_out,
+        "avg_input_tokens": avg("input_tokens"),
+        "avg_output_tokens": avg("output_tokens"),
+        "avg_reasoning_tokens": avg("reasoning_tokens"),
+        "input_estimate_ratio_max": max(ratios) if ratios else None,
+        "total_cost_rub": prices.cost_rub(total_in, total_out),
         "avg_latency_s": sum(latencies) / len(latencies) if latencies else None,
+        "p50_latency_s": percentile(latencies, 50),
         "p95_latency_s": percentile(latencies, 95),
         "errors": errors,
         "items": rows,
@@ -270,6 +304,27 @@ def _split_note(report: dict) -> str:
     return note
 
 
+MODE_LABELS = {"bm25": "BM25", "dense": "dense", "hybrid": "гибрид"}
+
+
+def mode_label(mode: str | None) -> str:
+    return MODE_LABELS.get(mode or "hybrid", str(mode))
+
+
+def _search_note(config: dict) -> str:
+    mode = config.get("search_mode", "hybrid")
+    note = f"Режим поиска демо: {mode_label(mode)}"
+    if mode == "hybrid":
+        note += (
+            f" (RRF k={config['rrf_k']}, веса BM25 : dense "
+            f"{num(config.get('bm25_weight', 1.0))} : {num(config.get('dense_weight', 1.0))})"
+        )
+    router = config.get("article_router")
+    if router is not None:
+        note += ", роутер номеров статей " + ("включён" if router else "выключен")
+    return note + "."
+
+
 def _row(name: str, m: dict) -> str:
     return (
         f"| {name} | {m['n']} | {pct(m['hit@1'])} | {pct(m['hit@3'])} | {pct(m['hit@5'])} | {dec(m['mrr@10'])} |"
@@ -287,8 +342,7 @@ def render_markdown(report: dict) -> str:
         f"{evals['n_total']} (с ответом {evals['n_positive']}, negative {evals['n_negative']})"
         + _split_note(report) + ".",
         f"Фрагмент до {config.get('chunk_max_chars')} символов. Эмбеддинги: `{config['embedding_model']}`, "
-        f"в модель уходит {config['top_k']} фрагментов, RRF k={config['rrf_k']}, веса BM25 : dense "
-        f"{num(config.get('bm25_weight', 1.0))} : {num(config.get('dense_weight', 1.0))}." + _runtime_note(report),
+        f"в модель уходит {config['top_k']} фрагментов. " + _search_note(config) + _runtime_note(report),
         "",
         "## Поиск (без LLM, negative не учитываются)",
         "",
@@ -297,13 +351,15 @@ def render_markdown(report: dict) -> str:
         "| Режим | n | hit@1 | hit@3 | hit@5 | MRR@10 |",
         "|---|---|---|---|---|---|",
     ]
+    main = report["retrieval"].get("main_mode", "hybrid")
     for mode in MODES:
-        lines.append(_row(mode, report["retrieval"][mode]))
-    by_split = report["retrieval"].get("hybrid_by_split") or {}
+        lines.append(_row(mode + (" (режим демо)" if mode == main else ""), report["retrieval"][mode]))
+    by_split = report["retrieval"].get("main_by_split") or {}
     if len(by_split) > 1:
         lines += [
             "",
-            "Гибрид по частям набора (настройки поиска подбирались только на dev, test отложен):",
+            f"Режим демо ({mode_label(main)}) по частям набора (настройки поиска выбирались только по dev, "
+            "test отложен):",
             "",
             "| Часть | n | hit@1 | hit@3 | hit@5 | MRR@10 |",
             "|---|---|---|---|---|---|",
@@ -315,7 +371,7 @@ def render_markdown(report: dict) -> str:
     if ctx:
         lines += [
             "",
-            "Что реально получает модель (гибрид):",
+            f"Что реально получает модель ({mode_label(main)}):",
             "",
             f"- Нужная статья среди {ctx['top_k']} фрагментов, которые уходят в модель: {pct(ctx['hit'])} "
             f"(n={ctx['n']}). Эти {ctx['top_k']} фрагментов взяты в среднем из {dec(ctx['distinct_articles_avg'], 1)} "
@@ -333,7 +389,8 @@ def render_markdown(report: dict) -> str:
             "",
             "## Точечные проверки (не входят в метрики)",
             "",
-            "Примеры со страницы и из README, запросы по номеру статьи. Ранг статьи; «—» — нет в top-10.",
+            "Примеры со страницы и из README, запросы по номеру статьи. Ранг статьи; «—» — нет в top-10. "
+            "Роутер номеров статей действует во всех трёх режимах.",
             "",
             "| Запрос | Тип | Ожидалась | BM25 | dense | гибрид |",
             "|---|---|---|---|---|---|",
@@ -347,20 +404,45 @@ def render_markdown(report: dict) -> str:
     lines += ["", "## Ответы модели", ""]
     a = report["answers"]
     if a.get("status") in ("ok", "partial"):
-        avg_cost = "—" if a["avg_cost_usd"] is None else f"${a['avg_cost_usd']:.5f}"
-        avg_lat = "—" if a["avg_latency_s"] is None else f"{dec(a['avg_latency_s'], 2)} с"
-        lines += [
-            f"- Модель: `{a['model']}`, вопросов: {a['n']}" + (f" (неполный: {a['reason']})" if a["reason"] else ""),
-            f"- Цитата попадает в ожидаемую статью: {pct(a['citation_hit_rate'])}",
-            f"- Все цитаты ведут на найденные фрагменты: {pct(a['citation_valid_rate'])}",
-            f"- Ложный отказ на вопросах с ответом: {pct(a['false_no_answer_rate'])}",
-            f"- Корректный отказ на negative: {pct(a['negative_refusal_rate'])}",
-            f"- Средняя стоимость: {avg_cost}, всего ${a['total_cost_usd']:.4f}",
-            f"- Средняя латентность: {avg_lat}",
-        ]
+        lines += answer_summary_lines(a)
     else:
         lines.append(f"Не прогонялось: {a.get('reason')}.")
     return "\n".join(lines) + "\n"
+
+
+def _sec(value) -> str:
+    return "—" if value is None else f"{dec(value, 2)} с"
+
+
+def _tok(value) -> str:
+    return "—" if value is None else f"{value:,.0f}".replace(",", "\u202f")
+
+
+def answer_summary_lines(a: dict) -> list[str]:
+    effort = f", reasoning_effort {a['reasoning_effort']}" if a.get("reasoning_effort") else ""
+    gateway = f", шлюз {a['gateway']}" if a.get("gateway") else ""
+    rub = "" if a.get("total_cost_rub") is None else f", ≈ {dec(a['total_cost_rub'], 2)} ₽"
+    return [
+        f"- Модель: `{a['model']}`{effort}{gateway}, temperature {a.get('temperature')}, "
+        f"предел ответа {a.get('max_completion_tokens')} токенов. Вопросов: {a['n']} "
+        f"(с ответом в кодексе {a['n_positive']}, без ответа {a['n_negative']})"
+        + (f". Неполный прогон: {a['reason']}" if a["reason"] else "") + ".",
+        f"- Ответ ссылается на ожидаемую статью: {pct(a['citation_hit_rate'])} (n={a['n_positive']})",
+        f"- Ложный отказ («в базе нет ответа», хотя ответ есть): {pct(a['false_no_answer_rate'])} "
+        f"(n={a['n_positive']})",
+        f"- Корректный отказ на вопросах без ответа в кодексе: {pct(a['negative_refusal_rate'])} "
+        f"(n={a['n_negative']})",
+        f"- Ответы без единой ссылки на статью (отказы не считаются): {pct(a['uncited_answer_rate'])} "
+        f"(n={a['n_answered']})",
+        f"- Все ссылки ведут на фрагменты, которые модель получила: {pct(a['citation_valid_rate'])}",
+        f"- Ответ оборван лимитом длины или пуст: {pct(a['incomplete_rate'])}",
+        f"- Токены на ответ в среднем: вход {_tok(a['avg_input_tokens'])}, выход {_tok(a['avg_output_tokens'])}, "
+        f"из них рассуждения {_tok(a['avg_reasoning_tokens'])}. Всего за прогон {_tok(a['total_tokens'])}{rub}.",
+        f"- Задержка ответа модели: p50 {_sec(a['p50_latency_s'])}, p95 {_sec(a['p95_latency_s'])}, "
+        f"среднее {_sec(a['avg_latency_s'])}",
+        f"- Оценка входа для резерва бюджета: факт / оценка не больше {dec(a['input_estimate_ratio_max'], 2)} "
+        "(меньше 1 — резерв с запасом)",
+    ]
 
 
 def _slug(text: str) -> str:
@@ -373,7 +455,7 @@ def run_file_name(report: dict) -> str:
     if report["evals"].get("limit"):
         parts.append(f"limit{report['evals']['limit']}")
     if report["answers"].get("status") in ("ok", "partial"):
-        parts.append("answers")
+        parts += ["answers", _slug(report["answers"].get("model") or "model")]
     parts.append(_slug((report.get("runtime") or {}).get("platform") or "unknown"))
     return "-".join(parts) + ".json"
 
@@ -382,7 +464,7 @@ def is_full_run(report: dict) -> bool:
     return report["evals"].get("split", "all") == "all" and not report["evals"].get("limit")
 
 
-def write_report(report: dict, out_dir: str | Path) -> list[Path]:
+def write_report(report: dict, out_dir: str | Path, update_latest: bool = True) -> list[Path]:
     """Always save the run under runs/; rewrite latest.* only for a full run."""
     out_dir = Path(out_dir)
     runs_dir = out_dir / "runs"
@@ -391,7 +473,7 @@ def write_report(report: dict, out_dir: str | Path) -> list[Path]:
     run_path = runs_dir / run_file_name(report)
     run_path.write_text(payload, encoding="utf-8")
     paths = [run_path]
-    if is_full_run(report):
+    if update_latest and is_full_run(report):
         (out_dir / "latest.json").write_text(payload, encoding="utf-8")
         (out_dir / "latest.md").write_text(render_markdown(report), encoding="utf-8")
         paths += [out_dir / "latest.json", out_dir / "latest.md"]
@@ -408,11 +490,13 @@ def run(
     rrf_k: int,
     answers: bool,
     generator: Generator | None,
-    max_usd: float,
+    max_run_tokens: int,
     now: datetime | None = None,
     split: str = "all",
     limit: int | None = None,
     spot_checks: list[dict] | None = None,
+    prices: Prices | None = None,
+    gateway: str | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     meta = retriever.index.meta
@@ -446,6 +530,8 @@ def run(
             "rrf_k": rrf_k,
             "bm25_weight": retriever.bm25_weight,
             "dense_weight": retriever.dense_weight,
+            "search_mode": retriever.mode,
+            "article_router": retriever.article_router,
         },
         "runtime": runtime_info(),
         "retrieval": run_retrieval(retriever, items, top_k=top_k),
@@ -454,9 +540,10 @@ def run(
     if not answers:
         report["answers"] = {"status": "not_run", "reason": "не запрашивалось (запуск без --answers)"}
     elif generator is None:
-        report["answers"] = {"status": "not_run", "reason": "нужен ключ ANTHROPIC_API_KEY"}
+        report["answers"] = {"status": "not_run", "reason": "нужны LLM_API_KEY и LLM_BASE_URL"}
     else:
-        report["answers"] = run_answers(retriever, generator, items, top_k, max_usd)
+        report["answers"] = run_answers(retriever, generator, items, top_k, max_run_tokens, prices)
+        report["answers"]["gateway"] = gateway
     return report
 
 
@@ -468,7 +555,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=str(settings.evals_dir))
     parser.add_argument("--top-k", type=int, default=settings.top_k)
     parser.add_argument("--answers", action="store_true", help="also evaluate model answers (needs API key)")
-    parser.add_argument("--max-usd", type=float, default=0.50, help="spend cap for one --answers run")
+    parser.add_argument(
+        "--max-run-tokens", type=int, default=150_000,
+        help="token cap for one --answers run, checked against the worst case before every call",
+    )
+    parser.add_argument("--no-latest", action="store_true", help="never rewrite latest.* (comparison runs)")
     parser.add_argument("--limit", type=int, default=None, help="only the first N questions")
     parser.add_argument(
         "--split", choices=SPLITS, default="all", help="dev (for tuning), test (held out) or all (default)"
@@ -486,15 +577,17 @@ def main(argv: list[str] | None = None) -> int:
         rrf_k=settings.rrf_k,
         bm25_weight=settings.bm25_weight,
         dense_weight=settings.dense_weight,
+        mode=settings.search_mode,
+        article_router=settings.article_router,
     )
     items = select_split(load_evals(args.evals), args.split)[: args.limit]
 
     generator = None
     if args.answers:
         if settings.has_api_key:
-            generator = ClaudeGenerator(model=settings.llm_model, max_tokens=settings.max_tokens)
+            generator = make_generator(settings)
         else:
-            print("--answers: ANTHROPIC_API_KEY не задан, ответы не прогоняются", file=sys.stderr)
+            print("--answers: LLM_API_KEY или LLM_BASE_URL не заданы, ответы не прогоняются", file=sys.stderr)
 
     report = run(
         retriever,
@@ -505,15 +598,17 @@ def main(argv: list[str] | None = None) -> int:
         rrf_k=settings.rrf_k,
         answers=args.answers,
         generator=generator,
-        max_usd=args.max_usd,
+        max_run_tokens=args.max_run_tokens,
         split=args.split,
         limit=args.limit,
         spot_checks=load_spot_checks(args.spot_checks),
+        prices=Prices(settings.price_rub_per_1m_input, settings.price_rub_per_1m_output),
+        gateway=gateway_host() if generator is not None else None,
     )
-    for path in write_report(report, args.out):
+    for path in write_report(report, args.out, update_latest=not args.no_latest):
         print(f"written {path}")
-    if not is_full_run(report):
-        print("latest.* not touched: only a full run (split all, no --limit) updates them")
+    if args.no_latest or not is_full_run(report):
+        print("latest.* not touched: only a full run (split all, no --limit, no --no-latest) updates them")
     print(render_markdown(report))
     return 0
 

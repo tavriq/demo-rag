@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import pytest
 
 from app.evals import assign_splits, load_evals, render_markdown, run, select_split, write_report
-from app.llm import ClaudeGenerator
 from app.metrics import first_relevant_rank, hit_at_k, is_negative, mrr, percentile
 from tests.conftest import EVALS
 
@@ -39,7 +38,7 @@ NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
 def _run(retriever, **kwargs):
     items = load_evals(EVALS)[: kwargs.get("limit")]
     params = dict(evals_path=str(EVALS), top_k=5, candidates=30, rrf_k=60, answers=False, generator=None,
-                  max_usd=0.5, now=NOW)
+                  max_run_tokens=150_000, now=NOW)
     params.update(kwargs)
     return items, run(retriever, items, **params)
 
@@ -54,7 +53,8 @@ def test_retrieval_evals_on_fixture_exclude_negatives(retriever):
         assert m["n"] == len(items) - n_neg
         assert 0 <= m["hit@1"] <= m["hit@3"] <= m["hit@5"] <= 1
         assert 0 <= m["mrr@10"] <= 1
-    assert set(report["retrieval"]["hybrid_by_type"]) == {"direct", "paraphrase"}
+    assert report["retrieval"]["main_mode"] == "hybrid"
+    assert set(report["retrieval"]["main_by_type"]) == {"direct", "paraphrase"}
     # BM25 with stemming must find most direct questions on this small corpus
     assert report["retrieval"]["bm25"]["hit@5"] >= 0.7
     assert report["answers"]["status"] == "not_run"
@@ -62,29 +62,47 @@ def test_retrieval_evals_on_fixture_exclude_negatives(retriever):
 
 def test_answers_without_key_are_marked_not_run(retriever):
     _, report = _run(retriever, answers=True, generator=None)
-    assert report["answers"] == {"status": "not_run", "reason": "нужен ключ ANTHROPIC_API_KEY"}
-    assert "Не прогонялось: нужен ключ" in render_markdown(report)
+    assert report["answers"] == {"status": "not_run", "reason": "нужны LLM_API_KEY и LLM_BASE_URL"}
+    assert "Не прогонялось: нужны LLM_API_KEY" in render_markdown(report)
 
 
-def test_answer_metrics_with_fake_model(retriever, fake_client_factory):
-    fake = fake_client_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    _, report = _run(retriever, answers=True, generator=gen)
+def test_answer_metrics_with_fake_model(retriever, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    _, report = _run(retriever, answers=True, generator=gen, gateway="gateway.test")
     a = report["answers"]
     assert a["status"] == "ok"
     assert a["n"] == 17 and a["n_negative"] == 3
     # only the one question about TK-115 is a citation hit
     assert a["citation_hit_rate"] == pytest.approx(1 / 14)
     assert a["negative_refusal_rate"] == 0
-    assert a["avg_cost_usd"] == pytest.approx(0.0015)
+    assert a["uncited_answer_rate"] == 0 and a["incomplete_rate"] == 0
+    assert a["avg_input_tokens"] == 1000 and a["avg_output_tokens"] == 100
+    assert a["total_tokens"] == 17 * 1100 and a["total_cost_rub"] is None
+    assert a["p50_latency_s"] is not None and a["p95_latency_s"] >= a["p50_latency_s"]
+    assert 0 < a["input_estimate_ratio_max"] < 1  # the fake reports fewer tokens than the reserve
+    assert a["gateway"] == "gateway.test" and a["model"] == "test/model"
+    md = render_markdown(report)
+    assert "p50" in md and "шлюз gateway.test" in md and "Ответы без единой ссылки" in md
 
 
-def test_answer_run_stops_at_spend_cap(retriever, fake_client_factory):
-    fake = fake_client_factory(text="В базе нет ответа на этот вопрос.", input_tokens=100_000, output_tokens=0)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    _, report = _run(retriever, answers=True, generator=gen, max_usd=0.25)
+def test_uncited_and_refusal_metrics(retriever, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Ответ без ссылок.")
+    a = _run(retriever, answers=True, generator=gen)[1]["answers"]
+    assert a["uncited_answer_rate"] == 1 and a["false_no_answer_rate"] == 0
+    gen, _ = fake_llm_factory(text="В базе нет ответа на этот вопрос.")
+    a = _run(retriever, answers=True, generator=gen)[1]["answers"]
+    assert a["negative_refusal_rate"] == 1 and a["false_no_answer_rate"] == 1
+    assert a["uncited_answer_rate"] is None  # every answer is a refusal
+
+
+def test_answer_run_stops_at_token_cap(retriever, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="В базе нет ответа на этот вопрос.", input_tokens=10_000, output_tokens=0)
+    _, report = _run(retriever, answers=True, generator=gen, max_run_tokens=25_000)
     assert report["answers"]["status"] == "partial"
-    assert report["answers"]["n"] == 3  # $0.10 each, stops once >= $0.25
+    assert "25000 токенов" in report["answers"]["reason"]
+    # 10k each: after two calls 20k are spent and the third still fits by its worst-case estimate
+    # (about 1.7k on this fixture); after it the next one does not
+    assert report["answers"]["n"] == 3
 
 
 def test_report_files_written(retriever, tmp_path):
@@ -96,7 +114,7 @@ def test_report_files_written(retriever, tmp_path):
     assert (tmp_path / "runs" / names[0]).exists()
     assert json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))["date"] == "2026-10-05"
     md = (tmp_path / "latest.md").read_text(encoding="utf-8")
-    assert "| hybrid |" in md and "2026-10-05" in md
+    assert "| hybrid (режим демо) |" in md and "| dense |" in md and "2026-10-05" in md
 
 
 def test_partial_runs_do_not_overwrite_latest(retriever, tmp_path):
@@ -105,7 +123,8 @@ def test_partial_runs_do_not_overwrite_latest(retriever, tmp_path):
     before = (tmp_path / "latest.json").read_text(encoding="utf-8")
     items = select_split(load_evals(EVALS), "dev")
     dev = run(retriever, items, evals_path=str(EVALS), top_k=5, candidates=30, rrf_k=60, answers=False,
-              generator=None, max_usd=0.5, now=datetime(2026, 10, 5, 13, 0, tzinfo=timezone.utc), split="dev")
+              generator=None, max_run_tokens=150_000, now=datetime(2026, 10, 5, 13, 0, tzinfo=timezone.utc),
+              split="dev")
     paths = write_report(dev, tmp_path)
     assert [p.name for p in paths] == [paths[0].name] and "-dev-" in paths[0].name
     _, limited = _run(retriever, limit=3, now=datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc))
@@ -143,12 +162,26 @@ def test_spot_checks_are_reported(retriever):
     assert "Точечные проверки" in render_markdown(report)
 
 
-def test_answer_run_checks_worst_case_before_the_call(retriever, fake_client_factory):
-    fake = fake_client_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    _, report = _run(retriever, answers=True, generator=gen, max_usd=0.001)  # below one worst case
+def test_answer_run_checks_worst_case_before_the_call(retriever, fake_llm_factory):
+    gen, gateway = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    _, report = _run(retriever, answers=True, generator=gen, max_run_tokens=1000)  # below one worst case
     assert report["answers"]["status"] == "partial" and report["answers"]["n"] == 0
-    assert fake.messages.calls == []
+    assert gateway.calls == []
+
+
+def test_answer_run_records_gateway_errors(retriever, fake_llm_factory):
+    gen, _ = fake_llm_factory(status=503)
+    a = _run(retriever, answers=True, generator=gen, limit=2)[1]["answers"]
+    assert a["status"] == "partial" and a["n"] == 0
+    assert a["errors"][0] == {"q": a["errors"][0]["q"], "error": "LLMStatusError", "status": 503}
+
+
+def test_answer_run_file_name_has_model_and_no_latest_flag(retriever, fake_llm_factory, tmp_path):
+    gen, _ = fake_llm_factory(model="openai/gpt-5.6-terra")
+    _, report = _run(retriever, answers=True, generator=gen)
+    paths = write_report(report, tmp_path, update_latest=False)
+    assert len(paths) == 1 and "-answers-openai-gpt-5-6-terra-" in paths[0].name
+    assert not (tmp_path / "latest.json").exists()
 
 
 def test_split_is_stratified_deterministic_and_order_independent():
@@ -166,12 +199,30 @@ def test_split_is_stratified_deterministic_and_order_independent():
     assert select_split(items, "all") == items
 
 
-def test_report_has_hybrid_by_split(retriever):
+def test_report_has_main_mode_by_split(retriever):
     _, report = _run(retriever)
-    by_split = report["retrieval"]["hybrid_by_split"]
+    by_split = report["retrieval"]["main_by_split"]
     assert set(by_split) == {"dev", "test"}
     assert sum(m["n"] for m in by_split.values()) == report["retrieval"]["hybrid"]["n"]
-    assert "Гибрид по частям набора" in render_markdown(report)
+    assert "Режим демо (гибрид) по частям набора" in render_markdown(report)
+
+
+def test_breakdowns_follow_the_demo_mode(index_dir):
+    from app.embeddings import HashEmbedder
+    from app.index import Index
+    from app.retrieval import Retriever
+
+    dense = Retriever(Index.load(index_dir), HashEmbedder(), mode="dense")
+    items = load_evals(EVALS)
+    report = run(dense, items, evals_path=str(EVALS), top_k=5, candidates=30, rrf_k=60, answers=False,
+                 generator=None, max_run_tokens=1, now=NOW)
+    r = report["retrieval"]
+    assert r["main_mode"] == "dense" and report["config"]["search_mode"] == "dense"
+    ranks = [row["rank"]["dense"] for row in r["items"]]
+    assert r["main_by_split"]["dev"]["n"] + r["main_by_split"]["test"]["n"] == len(ranks)
+    assert len(r["misses"]) == sum(1 for x in ranks if x is None or x > 5)
+    md = render_markdown(report)
+    assert "| dense (режим демо) |" in md and "Режим поиска демо: dense" in md
     assert all("split" in m for m in report["retrieval"]["misses"])
 
 

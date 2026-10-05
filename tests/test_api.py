@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import parse_trusted_proxies
 from app.guard import CostGuard
-from app.llm import ClaudeGenerator, MockGenerator
+from app.llm import LLMTransportError, MockGenerator
 from app.main import create_app
 
 
@@ -15,7 +15,10 @@ from app.main import create_app
 def make_client(settings, retriever, clock):
     def _make(generator=None, **overrides):
         s = replace(settings, **overrides)
-        guard = CostGuard(s.guard_db, s.daily_budget_usd, s.rate_limit_per_hour, clock=clock)
+        guard = CostGuard(
+            s.guard_db, s.daily_token_budget, s.rate_limit_per_hour, clock=clock,
+            hourly_token_budget=s.hourly_token_budget,
+        )
         app = create_app(settings=s, retriever=retriever, generator=generator or MockGenerator(), guard=guard)
         return TestClient(app)
 
@@ -41,8 +44,9 @@ def test_health_in_mock_mode(make_client):
     assert body["mode"] == "mock"
     assert body["model"] is None
     assert body["index"]["n_docs"] == 15
-    assert body["budget"]["spent_usd"] == 0
-    assert body["budget"]["limit_usd"] == 1.0
+    assert body["budget"]["tokens_today"] == 0
+    assert body["budget"]["daily_token_budget"] == 300_000
+    assert body["search_mode"] in ("bm25", "dense", "hybrid") and body["article_router"] is True
 
 
 def test_ask_mock_returns_fragments_and_clickable_citations(make_client):
@@ -57,8 +61,8 @@ def test_ask_mock_returns_fragments_and_clickable_citations(make_client):
     assert data["answer"]["citations"][0]["found"] is True
     assert data["answer"]["citations"][0]["anchor"] in anchors
     assert 'class="cite"' in data["answer"]["html"]
-    assert data["cost_usd"] == 0
-    assert data["budget"]["spent_usd"] == 0
+    assert data["tokens"] == 0
+    assert data["budget"]["tokens_today"] == 0
 
 
 def test_ask_validation_and_truncation(make_client):
@@ -88,56 +92,90 @@ def test_spoofed_forwarded_for_does_not_bypass_rate_limit(make_client):
     assert resp.status_code == 429
 
 
-def test_live_mode_spends_from_usage_and_stops_at_budget(make_client, fake_client_factory):
-    fake = fake_client_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    client = make_client(generator=gen, daily_budget_usd=0.03, rate_limit_per_hour=100)
+def test_live_mode_spends_from_usage_and_stops_at_budget(make_client, fake_llm_factory):
+    gen, gateway = fake_llm_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
+    client = make_client(generator=gen, daily_token_budget=12_000, rate_limit_per_hour=100)
     first = client.post("/api/ask", json={"question": "Сколько дней отпуск?"})
     assert first.status_code == 200
     data = first.json()
     assert data["mode"] == "live"
-    assert data["cost_usd"] == pytest.approx(0.0035)  # 2000 * $1/M + 300 * $5/M
-    assert data["budget"]["spent_usd"] == pytest.approx(0.0035)
-    assert data["usage"] == {"input_tokens": 2000, "output_tokens": 300}
+    assert data["tokens"] == 2300
+    assert data["cost_rub"] is None  # no prices configured: tokens only
+    assert data["budget"]["tokens_today"] == 2300
+    assert data["usage"] == {"input_tokens": 2000, "output_tokens": 300, "reasoning_tokens": 0}
     # keep asking new questions until the worst-case reservation no longer fits into the budget
     statuses = [client.post("/api/ask", json={"question": f"отпуск {i}"}).status_code for i in range(10)]
     assert 429 in statuses
     blocked = client.post("/api/ask", json={"question": "отпуск без сохранения"})
     assert blocked.json()["error"] == "budget_exhausted"
     assert blocked.json()["fragments"], "fragments are still shown when the budget is exhausted"
-    assert client.get("/api/health").json()["budget"]["spent_usd"] <= 0.03
-    assert len(fake.messages.calls) == statuses.index(429) + 1
+    assert client.get("/api/health").json()["budget"]["tokens_today"] <= 12_000
+    assert len(gateway.calls) == statuses.index(429) + 1
 
 
-def test_model_output_is_escaped_in_api(make_client, fake_client_factory):
-    fake = fake_client_factory(text='<img src=x onerror="alert(1)"> [ст. 115]')
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
+def test_rubles_shown_only_when_prices_are_set(settings, retriever, clock, fake_llm_factory):
+    from app.pricing import Prices
+
+    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    guard = CostGuard(settings.guard_db, 300_000, 10, clock=clock, prices=Prices(100.0, 400.0))
+    s = replace(settings, price_rub_per_1m_input=100.0, price_rub_per_1m_output=400.0)
+    client = TestClient(create_app(settings=s, retriever=retriever, generator=gen, guard=guard))
+    data = client.post("/api/ask", json={"question": "отпуск"}).json()
+    assert data["cost_rub"] == pytest.approx(0.14)  # 1000 * 100/M + 100 * 400/M
+    assert data["budget"]["rub_today"] == pytest.approx(0.14)
+
+
+def test_model_output_is_escaped_in_api(make_client, fake_llm_factory):
+    gen, gateway = fake_llm_factory(text='<img src=x onerror="alert(1)"> [ст. 115]')
     data = make_client(generator=gen).post("/api/ask", json={"question": "<b>отпуск</b>"}).json()
     assert "<img" not in data["answer"]["html"]
     assert "&lt;img" in data["answer"]["html"]
-    sent = fake.messages.calls[0]["messages"][0]["content"]
+    sent = gateway.calls[0]["messages"][1]["content"]
     assert "<b>" not in sent and "&lt;b&gt;отпуск" in sent
 
 
-def test_api_error_releases_reservation(make_client, retriever):
-    import anthropic
-    import httpx2
-
-    class Failing:
-        mode = "live"
-        model = "claude-haiku-4-5-20251001"
-
-        def generate(self, question, hits):
-            request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-            response = httpx2.Response(529, request=request)
-            raise anthropic.APIStatusError("overloaded", response=response, body=None)
-
-    client = make_client(generator=Failing())
+@pytest.mark.parametrize("status, released", [(400, True), (429, True), (503, False)])
+def test_gateway_error_status(make_client, fake_llm_factory, status, released):
+    gen, _ = fake_llm_factory(status=status)
+    client = make_client(generator=gen)
     resp = client.post("/api/ask", json={"question": "отпуск"})
     assert resp.status_code == 502
     assert resp.json()["error"] == "llm_unavailable"
     assert resp.json()["fragments"]
-    assert client.get("/api/health").json()["budget"]["spent_usd"] == 0
+    tokens = client.get("/api/health").json()["budget"]["tokens_today"]
+    # a rejected request is not billed; on 5xx the worst-case reservation stays
+    assert (tokens == 0) is released
+
+
+def test_transport_error_keeps_reservation_and_logs_no_url(make_client, retriever, caplog):
+    class Failing:
+        mode = "live"
+        model = "test/model"
+
+        def generate(self, question, hits):
+            raise LLMTransportError("ReadTimeout")
+
+    client = make_client(generator=Failing())
+    with caplog.at_level("INFO"):
+        resp = client.post("/api/ask", json={"question": "отпуск"})
+    assert resp.status_code == 502
+    assert client.get("/api/health").json()["budget"]["tokens_today"] > 0
+    assert "LLMTransportError" in caplog.text and "http" not in caplog.text.lower().replace("httpx", "")
+
+
+def test_missing_usage_keeps_worst_case_reservation(make_client, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", usage=False)
+    client = make_client(generator=gen)
+    assert client.post("/api/ask", json={"question": "отпуск"}).status_code == 200
+    assert client.get("/api/health").json()["budget"]["tokens_today"] > 1000
+
+
+def test_truncated_answer_is_not_cached(make_client, fake_llm_factory):
+    gen, gateway = fake_llm_factory(text="Длинный", finish_reason="length")
+    client = make_client(generator=gen, rate_limit_per_hour=100)
+    client.post("/api/ask", json={"question": "отпуск"})
+    again = client.post("/api/ask", json={"question": "отпуск"}).json()
+    assert again["cached"] is False and len(gateway.calls) == 2
 
 
 def test_evals_page_and_json(make_client, settings):
@@ -156,7 +194,7 @@ def test_evals_page_and_json(make_client, settings):
 
 def test_missing_index_degrades_gracefully(settings, tmp_path, clock):
     s = replace(settings, index_dir=tmp_path / "nope")
-    guard = CostGuard(s.guard_db, 1.0, 10, clock=clock)
+    guard = CostGuard(s.guard_db, 300_000, 10, clock=clock)
     client = TestClient(create_app(settings=s, generator=MockGenerator(), guard=guard))
     health = client.get("/api/health").json()
     assert health["status"] == "degraded" and health["index"] is None
@@ -195,29 +233,27 @@ def test_body_within_limit_with_escaped_cyrillic_is_accepted(make_client):
     assert resp.json()["truncated"] is True
 
 
-def test_repeated_question_is_answered_from_cache_for_free(make_client, fake_client_factory):
-    fake = fake_client_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
+def test_repeated_question_is_answered_from_cache_for_free(make_client, fake_llm_factory):
+    gen, gateway = fake_llm_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
     client = make_client(generator=gen, rate_limit_per_hour=100)
     first = client.post("/api/ask", json={"question": "Сколько дней отпуск?"}).json()
-    assert first["cached"] is False and first["cost_usd"] > 0
+    assert first["cached"] is False and first["tokens"] > 0
     again = client.post("/api/ask", json={"question": "  сколько  дней ОТПУСК "}).json()
     assert again["cached"] is True
-    assert again["cost_usd"] == 0 and again["usage"] is None
+    assert again["tokens"] == 0 and again["usage"] is None
     assert again["answer"]["text"] == first["answer"]["text"]
     assert again["fragments"] == first["fragments"]
     assert again["answer"]["citations"][0]["found"] is True
-    assert again["budget"]["spent_usd"] == pytest.approx(first["budget"]["spent_usd"])
-    assert len(fake.messages.calls) == 1
+    assert again["budget"]["tokens_today"] == first["budget"]["tokens_today"]
+    assert len(gateway.calls) == 1
     # another top_k is another context, so another answer
     other = client.post("/api/ask", json={"question": "Сколько дней отпуск?", "top_k": 3}).json()
-    assert other["cached"] is False and len(fake.messages.calls) == 2
+    assert other["cached"] is False and len(gateway.calls) == 2
 
 
-def test_cached_answer_is_served_when_budget_is_exhausted(make_client, fake_client_factory):
-    fake = fake_client_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    client = make_client(generator=gen, daily_budget_usd=0.012, rate_limit_per_hour=100)
+def test_cached_answer_is_served_when_budget_is_exhausted(make_client, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Отпуск 28 дней [ст. 115].", input_tokens=2000, output_tokens=300)
+    client = make_client(generator=gen, daily_token_budget=9000, rate_limit_per_hour=100)
     assert client.post("/api/ask", json={"question": "Сколько дней отпуск?"}).status_code == 200
     statuses = [client.post("/api/ask", json={"question": f"вопрос {i}"}).status_code for i in range(5)]
     assert statuses[-1] == 429
@@ -225,18 +261,19 @@ def test_cached_answer_is_served_when_budget_is_exhausted(make_client, fake_clie
     assert cached.status_code == 200 and cached.json()["cached"] is True
 
 
-def test_global_hourly_cap_applies_across_clients(settings, retriever, clock, fake_client_factory):
-    fake = fake_client_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
+def test_hourly_token_budget_applies_across_clients(settings, retriever, clock, fake_llm_factory):
+    gen, _ = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
     s = replace(settings, trusted_proxies=parse_trusted_proxies("10.0.0.1"), rate_limit_per_hour=100)
-    guard = CostGuard(s.guard_db, 1.0, 100, clock=clock, global_paid_per_hour=2)
+    guard = CostGuard(s.guard_db, 10**9, 100, clock=clock, hourly_token_budget=6000)
     app = create_app(settings=s, retriever=retriever, generator=gen, guard=guard)
     client = TestClient(app, client=("10.0.0.1", 50000))  # the trusted proxy
     codes = []
-    for i in range(3):
+    for i in range(5):
         resp = client.post("/api/ask", json={"question": f"отпуск {i}"}, headers={"X-Forwarded-For": f"203.0.113.{i}"})
         codes.append(resp.status_code)
-    assert codes == [200, 200, 429]
+    # every visitor has a different address, so only the shared hourly budget can stop them
+    assert codes[0] == 200 and 429 in codes
+    assert all(code == 429 for code in codes[codes.index(429):])
     assert resp.json()["error"] == "global_limited"
     assert resp.json()["fragments"]
     assert int(resp.headers["Retry-After"]) > 0
@@ -249,20 +286,25 @@ def test_ipv6_clients_share_a_bucket_per_64(make_client):
     assert keys == {"2001:db8::/64"}
 
 
-def test_warm_up_answers_examples_once(settings, retriever, clock, fake_client_factory):
+def test_warm_up_answers_examples_once(settings, retriever, clock, fake_llm_factory):
     from app.examples import ui_examples
 
-    fake = fake_client_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
-    gen = ClaudeGenerator(model="claude-haiku-4-5-20251001", max_tokens=600, client=fake)
-    guard = CostGuard(settings.guard_db, 1.0, 10, clock=clock)
+    gen, gateway = fake_llm_factory(text="Ответ [ст. 115].", input_tokens=1000, output_tokens=100)
+    guard = CostGuard(settings.guard_db, 300_000, 10, clock=clock)
     app = create_app(settings=settings, retriever=retriever, generator=gen, guard=guard)
     examples = ui_examples()
     assert examples
     with TestClient(app) as client:
         app.state.warmup_thread.join(timeout=30)
-        assert len(fake.messages.calls) == len(examples)
+        assert len(gateway.calls) == len(examples)
         data = client.post("/api/ask", json={"question": examples[0]}).json()
-        assert data["cached"] is True and len(fake.messages.calls) == len(examples)
+        assert data["cached"] is True and len(gateway.calls) == len(examples)
+
+
+def test_question_with_article_number_pins_that_article(make_client):
+    data = make_client().post("/api/ask", json={"question": "Что сказано в ст. 81?"}).json()
+    assert data["fragments"][0]["article"] == "81" and data["fragments"][0]["pinned"] is True
+    assert all(not f["pinned"] for f in data["fragments"] if f["article"] != "81")
 
 
 def test_forwarded_for_without_trusted_proxy_is_flagged(make_client):

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
+import httpx2
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ from app.chunking import chunk_corpus, load_corpus  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.embeddings import HashEmbedder  # noqa: E402
 from app.index import Index, build_index  # noqa: E402
+from app.llm import ChatCompletionsGenerator  # noqa: E402
 from app.retrieval import Retriever  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -71,35 +73,75 @@ def clock():
     return FakeClock()
 
 
-class FakeMessages:
-    """Stands in for client.messages: returns a canned response, records calls."""
+class FakeGateway:
+    """An OpenAI-compatible /chat/completions endpoint behind httpx2.MockTransport.
 
-    def __init__(self, text: str, input_tokens: int = 1000, output_tokens: int = 200, stop_reason: str = "end_turn"):
+    Returns a canned completion (or an error status), records request bodies.
+    """
+
+    def __init__(
+        self,
+        text: str | None,
+        input_tokens: int = 1000,
+        output_tokens: int = 200,
+        finish_reason: str = "stop",
+        status: int = 200,
+        reasoning_tokens: int = 0,
+        usage: bool = True,
+    ):
         self.text = text
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
-        self.stop_reason = stop_reason
+        self.finish_reason = finish_reason
+        self.status = status
+        self.reasoning_tokens = reasoning_tokens
+        self.usage = usage
         self.calls: list[dict] = []
+        self.paths: list[str] = []
+        self.headers: list[dict] = []
 
-    def create(self, **params):
-        self.calls.append(params)
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=self.text)],
-            stop_reason=self.stop_reason,
-            usage=SimpleNamespace(
-                input_tokens=self.input_tokens,
-                output_tokens=self.output_tokens,
-                cache_creation_input_tokens=None,
-                cache_read_input_tokens=None,
-            ),
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
+        self.calls.append(json.loads(request.content))
+        self.paths.append(request.url.path)
+        self.headers.append(dict(request.headers))
+        if self.status != 200:
+            return httpx2.Response(self.status, json={"error": {"message": "fail"}})
+        body = {
+            "id": "x",
+            "object": "chat.completion",
+            "model": self.calls[-1]["model"],
+            "choices": [
+                {"index": 0, "finish_reason": self.finish_reason,
+                 "message": {"role": "assistant", "content": self.text}}
+            ],
+        }
+        if self.usage:
+            body["usage"] = {
+                "prompt_tokens": self.input_tokens,
+                "completion_tokens": self.output_tokens,
+                "total_tokens": self.input_tokens + self.output_tokens,
+                "completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens},
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
+        return httpx2.Response(200, json=body)
+
+    def client(self) -> httpx2.Client:
+        return httpx2.Client(
+            base_url="https://gateway.test/v1/",
+            headers={"Authorization": "Bearer test-key"},
+            transport=httpx2.MockTransport(self.handler),
         )
 
 
-class FakeAnthropic:
-    def __init__(self, **kwargs):
-        self.messages = FakeMessages(**kwargs)
-
-
 @pytest.fixture
-def fake_client_factory():
-    return FakeAnthropic
+def fake_llm_factory():
+    """fake_llm_factory(text=..., ...) -> (ChatCompletionsGenerator, FakeGateway)."""
+
+    def _make(text="Ответ [ст. 115].", model="test/model", max_tokens=600, reasoning_effort=None, **kwargs):
+        gateway = FakeGateway(text, **kwargs)
+        gen = ChatCompletionsGenerator(
+            model=model, max_tokens=max_tokens, client=gateway.client(), reasoning_effort=reasoning_effort
+        )
+        return gen, gateway
+
+    return _make

@@ -10,17 +10,21 @@
   const button = $("ask-button");
   let maxChars = 500;
 
-  function fmtUsd(value) {
-    return "$" + Number(value || 0).toFixed(value < 0.01 ? 4 : 2);
+  function fmtInt(value) {
+    return Number(value || 0).toLocaleString("ru-RU");
+  }
+
+  function fmtRub(value) {
+    return "≈ " + Number(value).toLocaleString("ru-RU", { maximumFractionDigits: 2 }) + " ₽";
   }
 
   function setBudget(budget) {
     if (!budget) return;
-    $("budget").textContent =
-      "Потрачено сегодня: " + fmtUsd(budget.spent_usd) + " из " + fmtUsd(budget.limit_usd) +
-      " (сутки по UTC)";
+    let text = "Токенов сегодня: " + fmtInt(budget.tokens_today) + " из " + fmtInt(budget.daily_token_budget);
+    if (budget.rub_today !== null && budget.rub_today !== undefined) text += " (" + fmtRub(budget.rub_today) + ")";
+    $("budget").textContent = text + ", сутки по UTC";
     if (budget.rate_limit_per_hour) $("rate-limit").textContent = String(budget.rate_limit_per_hour);
-    if (budget.global_paid_per_hour) $("global-limit").textContent = String(budget.global_paid_per_hour);
+    if (budget.hourly_token_budget) $("hourly-limit").textContent = fmtInt(budget.hourly_token_budget);
   }
 
   function updateCount() {
@@ -36,6 +40,7 @@
   }
 
   function rankText(f) {
+    if (f.pinned) return "найдено по номеру статьи в вопросе";
     const parts = [];
     parts.push("BM25 " + (f.bm25_rank ? "#" + f.bm25_rank : "—"));
     parts.push("dense " + (f.dense_rank ? "#" + f.dense_rank : "—"));
@@ -87,8 +92,10 @@
       meta.push("ответ из кэша" + (data.cached_at ? " от " + data.cached_at.slice(0, 10) : "") + ", бесплатно");
     } else if (data.mode === "live") {
       meta.push("модель " + data.model);
-      if (data.usage) meta.push(data.usage.input_tokens + " → " + data.usage.output_tokens + " токенов");
-      meta.push("стоимость " + fmtUsd(data.cost_usd));
+      if (data.usage) {
+        meta.push(fmtInt(data.usage.input_tokens) + " → " + fmtInt(data.usage.output_tokens) + " токенов");
+      }
+      if (data.cost_rub !== null && data.cost_rub !== undefined) meta.push(fmtRub(data.cost_rub));
     } else {
       meta.push("демо-режим без ключа");
     }
