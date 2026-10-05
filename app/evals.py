@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,21 @@ def assign_splits(items: list[dict]) -> None:
         group.sort(key=lambda it: hashlib.sha256(it["q"].encode("utf-8")).hexdigest())
         for pos, item in enumerate(group):
             item["split"] = "dev" if pos % 2 == 0 else "test"
+
+
+def runtime_info() -> dict:
+    """Where the run happened: int8 embeddings differ slightly between CPUs (see evals/tuning.md)."""
+    try:
+        import onnxruntime
+
+        ort_version = onnxruntime.__version__
+    except ImportError:  # pragma: no cover - onnxruntime is a hard dependency
+        ort_version = None
+    return {
+        "platform": f"{platform.system()} {platform.machine()}",
+        "python": platform.python_version(),
+        "onnxruntime": ort_version,
+    }
 
 
 def load_evals(path: str | Path) -> list[dict]:
@@ -177,6 +193,13 @@ def _fmt_pct(v) -> str:
     return "—" if v is None else f"{v * 100:.1f}%"
 
 
+def _runtime_note(report: dict) -> str:
+    rt = report.get("runtime") or {}
+    if not rt:
+        return ""
+    return f" Платформа: {rt.get('platform')}, Python {rt.get('python')}, onnxruntime {rt.get('onnxruntime')}."
+
+
 def _split_note(report: dict) -> str:
     split = report["evals"].get("split", "all")
     return "" if split == "all" else f", только часть `{split}`"
@@ -192,7 +215,7 @@ def render_markdown(report: dict) -> str:
         f"negative {report['evals']['n_negative']})" + _split_note(report) + ".",
         f"Чанк до {report['config'].get('chunk_max_chars')} символов. Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}, "
         f"RRF k={report['config']['rrf_k']}, веса BM25/dense {report['config'].get('bm25_weight', 1.0)}"
-        f"/{report['config'].get('dense_weight', 1.0)}.",
+        f"/{report['config'].get('dense_weight', 1.0)}." + _runtime_note(report),
         "",
         "## Поиск (без LLM, negative не учитываются)",
         "",
@@ -297,6 +320,7 @@ def run(
             "bm25_weight": retriever.bm25_weight,
             "dense_weight": retriever.dense_weight,
         },
+        "runtime": runtime_info(),
         "retrieval": run_retrieval(retriever, items),
     }
     if not answers:

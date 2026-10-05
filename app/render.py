@@ -104,7 +104,9 @@ def render_evals_page(latest: dict | None) -> str:
     )
     out.append(
         "<p class=\"muted\">Чанк до {chunk} символов. Эмбеддинги: <code>{model}</code>, top-k {k}, кандидатов на ретривер {cand}, "
-        "RRF k={rrf}, веса BM25/dense {wb}/{wd}. Negative-вопросы в hit@k не входят.</p>".format(
+        "RRF k={rrf}, веса BM25/dense {wb}/{wd}. Платформа прогона: {plat}. "
+        "Negative-вопросы в hit@k не входят.</p>".format(
+            plat=esc((latest.get("runtime") or {}).get("platform", "—")),
             chunk=esc(config.get("chunk_max_chars")),
             model=esc(config.get("embedding_model")),
             k=esc(config.get("top_k")),

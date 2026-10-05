@@ -119,3 +119,10 @@ def test_report_has_hybrid_by_split(retriever):
     assert sum(m["n"] for m in by_split.values()) == report["retrieval"]["hybrid"]["n"]
     assert "Гибрид по частям набора" in render_markdown(report)
     assert all("split" in m for m in report["retrieval"]["misses"])
+
+
+def test_report_records_runtime(retriever):
+    _, report = _run(retriever)
+    rt = report["runtime"]
+    assert rt["platform"] and rt["python"] and rt["onnxruntime"]
+    assert f"Платформа: {rt['platform']}" in render_markdown(report)
