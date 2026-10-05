@@ -1,0 +1,28 @@
+name: demo-rag
+
+services:
+  app:
+    build: .
+    image: demo-rag:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18101:8000"
+    mem_limit: 700m
+    cpus: 1.5
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - demo-rag-var:/var/lib/demo-rag
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  demo-rag-var:
