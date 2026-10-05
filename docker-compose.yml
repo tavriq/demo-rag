@@ -17,6 +17,9 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # Host headers accepted by the MCP endpoint /mcp (DNS-rebinding protection), see app/mcp_server.py
+      MCP_ALLOWED_HOSTS: "rag.tavriq.ru,127.0.0.1:*,localhost:*"
     volumes:
       - demo-rag-var:/var/lib/demo-rag
     security_opt:
