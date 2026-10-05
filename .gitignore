@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Runtime state: index, model cache, guard sqlite
+var/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
