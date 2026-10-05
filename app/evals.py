@@ -318,8 +318,8 @@ def render_markdown(report: dict) -> str:
             "Что реально получает модель (гибрид):",
             "",
             f"- Нужная статья среди {ctx['top_k']} фрагментов, которые уходят в модель: {pct(ctx['hit'])} "
-            f"(n={ctx['n']}). Эти {ctx['top_k']} фрагментов покрывают в среднем {dec(ctx['distinct_articles_avg'], 1)} "
-            f"разных статей, минимум {ctx['distinct_articles_min']}.",
+            f"(n={ctx['n']}). Эти {ctx['top_k']} фрагментов взяты в среднем из {dec(ctx['distinct_articles_avg'], 1)} "
+            f"статьи, минимум из {ctx['distinct_articles_min']}.",
         ]
     if multi and multi["n"]:
         lines.append(

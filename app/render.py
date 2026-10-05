@@ -182,7 +182,7 @@ def render_evals_page(latest: dict | None) -> str:
         if ctx:
             out.append(
                 "<li>Нужная статья среди {k} фрагментов, которые уходят в модель: <strong>{hit}</strong> "
-                "(n={n}). Эти фрагменты покрывают в среднем {avg} разных статей, минимум {mn}.</li>".format(
+                "(n={n}). Эти фрагменты взяты в среднем из {avg} статьи, минимум из {mn}.</li>".format(
                     k=esc(ctx.get("top_k")), hit=_pct(ctx.get("hit")), n=esc(ctx.get("n")),
                     avg=esc(_num(ctx.get("distinct_articles_avg"), 1)), mn=esc(ctx.get("distinct_articles_min")),
                 )
