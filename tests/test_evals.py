@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.evals import load_evals, render_markdown, run, write_report
+from app.evals import assign_splits, load_evals, render_markdown, run, select_split, write_report
 from app.llm import ClaudeGenerator
 from app.metrics import first_relevant_rank, hit_at_k, is_negative, mrr, percentile
 from tests.conftest import EVALS
@@ -95,3 +95,27 @@ def test_report_files_written(retriever, tmp_path):
     assert json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))["date"] == "2026-10-05"
     md = (tmp_path / "latest.md").read_text(encoding="utf-8")
     assert "| hybrid |" in md and "2026-10-05" in md
+
+
+def test_split_is_stratified_deterministic_and_order_independent():
+    items = load_evals(EVALS)
+    splits = {it["q"]: it["split"] for it in items}
+    assert set(splits.values()) == {"dev", "test"}
+    for qtype in {it["type"] for it in items}:
+        group = [it["split"] for it in items if it["type"] == qtype]
+        assert abs(group.count("dev") - group.count("test")) <= 1
+    reordered = list(reversed([dict(q=it["q"], type=it["type"], expected_ids=it["expected_ids"]) for it in items]))
+    assign_splits(reordered)
+    assert {it["q"]: it["split"] for it in reordered} == splits
+    dev, test = select_split(items, "dev"), select_split(items, "test")
+    assert len(dev) + len(test) == len(items) and not {i["q"] for i in dev} & {i["q"] for i in test}
+    assert select_split(items, "all") == items
+
+
+def test_report_has_hybrid_by_split(retriever):
+    _, report = _run(retriever)
+    by_split = report["retrieval"]["hybrid_by_split"]
+    assert set(by_split) == {"dev", "test"}
+    assert sum(m["n"] for m in by_split.values()) == report["retrieval"]["hybrid"]["n"]
+    assert "Гибрид по частям набора" in render_markdown(report)
+    assert all("split" in m for m in report["retrieval"]["misses"])

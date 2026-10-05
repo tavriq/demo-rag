@@ -38,6 +38,10 @@ def test_evals_page_escapes_file_content():
         "config": {"embedding_model": "m", "top_k": 5},
         "retrieval": {
             "bm25": {"n": 1, "hit@1": 1.0, "hit@3": 1.0, "hit@5": 1.0, "mrr@10": 1.0},
+            "hybrid_by_split": {
+                "dev": {"n": 1, "hit@1": 0.0, "hit@5": 1.0, "mrr@10": 0.5},
+                "<i>test</i>": {"n": 1, "hit@1": 1.0, "hit@5": 1.0, "mrr@10": 1.0},
+            },
             "misses": [{"q": "<b>q</b>", "expected_ids": ["TK-1"], "top": ["TK-2"]}],
         },
         "answers": {"status": "not_run", "reason": "нужен ключ <API>"},
@@ -47,6 +51,7 @@ def test_evals_page_escapes_file_content():
     assert "<b>q</b>" not in page
     assert "Не прогонялось: нужен ключ &lt;API&gt;" in page
     assert "100.0%" in page
+    assert "Гибрид на dev и test" in page and "<i>test</i>" not in page
 
 
 def test_evals_page_without_runs():

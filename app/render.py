@@ -103,8 +103,9 @@ def render_evals_page(latest: dict | None) -> str:
         )
     )
     out.append(
-        "<p class=\"muted\">Эмбеддинги: <code>{model}</code>, top-k {k}, кандидатов на ретривер {cand}, "
+        "<p class=\"muted\">Чанк до {chunk} символов. Эмбеддинги: <code>{model}</code>, top-k {k}, кандидатов на ретривер {cand}, "
         "RRF k={rrf}, веса BM25/dense {wb}/{wd}. Negative-вопросы в hit@k не входят.</p>".format(
+            chunk=esc(config.get("chunk_max_chars")),
             model=esc(config.get("embedding_model")),
             k=esc(config.get("top_k")),
             cand=esc(config.get("candidates")),
@@ -144,6 +145,24 @@ def render_evals_page(latest: dict | None) -> str:
             out.append(
                 "<tr><td>{t}</td><td>{n}</td><td>{h1}</td><td>{h5}</td><td>{mrr}</td></tr>".format(
                     t=esc(qtype), n=esc(m.get("n")), h1=_pct(m.get("hit@1")),
+                    h5=_pct(m.get("hit@5")), mrr=_num(m.get("mrr@10")),
+                )
+            )
+        out.append("</tbody></table></div>")
+
+    by_split = retrieval.get("hybrid_by_split") or {}
+    if len(by_split) > 1:
+        out.append("<h3>Гибрид на dev и test</h3>")
+        out.append(
+            '<p class="muted">Размер чанка и веса RRF подбирались только на dev; test в подборе не участвовал, '
+            "поэтому честная оценка — строка test. Протокол и все итерации — <code>evals/tuning.md</code>.</p>"
+        )
+        out.append('<div class="table-scroll"><table><thead><tr><th>Часть</th><th>n</th>'
+                   "<th>hit@1</th><th>hit@5</th><th>MRR@10</th></tr></thead><tbody>")
+        for name, m in sorted(by_split.items()):
+            out.append(
+                "<tr><td>{t}</td><td>{n}</td><td>{h1}</td><td>{h5}</td><td>{mrr}</td></tr>".format(
+                    t=esc(name), n=esc(m.get("n")), h1=_pct(m.get("hit@1")),
                     h5=_pct(m.get("hit@5")), mrr=_num(m.get("mrr@10")),
                 )
             )

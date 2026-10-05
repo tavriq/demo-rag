@@ -12,6 +12,7 @@ Writes evals/results-<date>.json, evals/latest.json and evals/latest.md.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -27,6 +28,24 @@ from app.metrics import first_relevant_rank, is_negative, percentile, rate, retr
 from app.retrieval import MODES, Retriever
 
 RANK_DEPTH = 10
+SPLITS = ("all", "dev", "test")
+
+
+def assign_splits(items: list[dict]) -> None:
+    """Deterministic stratified dev/test split, stored in item["split"].
+
+    Within each question type items are ordered by sha256 of the question text;
+    even positions go to dev, odd to test. Retriever settings are tuned on dev
+    only, test stays held out (see evals/tuning.md). The split does not depend on
+    the order of lines in the file.
+    """
+    by_type: dict[str, list[dict]] = {}
+    for item in items:
+        by_type.setdefault(item["type"], []).append(item)
+    for group in by_type.values():
+        group.sort(key=lambda it: hashlib.sha256(it["q"].encode("utf-8")).hexdigest())
+        for pos, item in enumerate(group):
+            item["split"] = "dev" if pos % 2 == 0 else "test"
 
 
 def load_evals(path: str | Path) -> list[dict]:
@@ -42,7 +61,14 @@ def load_evals(path: str | Path) -> list[dict]:
             row.setdefault("expected_ids", [])
             row.setdefault("type", "negative" if not row["expected_ids"] else "unspecified")
             items.append(row)
+    assign_splits(items)
     return items
+
+
+def select_split(items: list[dict], split: str) -> list[dict]:
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {SPLITS}")
+    return items if split == "all" else [it for it in items if it.get("split") == split]
 
 
 def run_retrieval(retriever: Retriever, items: list[dict]) -> dict:
@@ -60,11 +86,21 @@ def run_retrieval(retriever: Retriever, items: list[dict]) -> dict:
         result[mode] = retrieval_summary(ranks)
 
     by_type: dict[str, list] = {}
+    by_split: dict[str, list] = {}
     for item, rank, _ in hybrid_rows:
         by_type.setdefault(item["type"], []).append(rank)
+        if item.get("split"):
+            by_split.setdefault(item["split"], []).append(rank)
     result["hybrid_by_type"] = {t: retrieval_summary(r) for t, r in by_type.items()}
+    result["hybrid_by_split"] = {s: retrieval_summary(by_split[s]) for s in sorted(by_split)}
     result["misses"] = [
-        {"q": item["q"], "type": item["type"], "expected_ids": item["expected_ids"], "top": ranked[:5]}
+        {
+            "q": item["q"],
+            "type": item["type"],
+            "split": item.get("split"),
+            "expected_ids": item["expected_ids"],
+            "top": ranked[:5],
+        }
         for item, rank, ranked in hybrid_rows
         if rank is None or rank > 5
     ]
@@ -141,6 +177,11 @@ def _fmt_pct(v) -> str:
     return "—" if v is None else f"{v * 100:.1f}%"
 
 
+def _split_note(report: dict) -> str:
+    split = report["evals"].get("split", "all")
+    return "" if split == "all" else f", только часть `{split}`"
+
+
 def render_markdown(report: dict) -> str:
     lines = [
         f"# Evals — {report['date']}",
@@ -148,8 +189,8 @@ def render_markdown(report: dict) -> str:
         f"Корпус: `{report['corpus']['path']}` — {report['corpus']['n_docs']} статей, "
         f"{report['corpus']['n_chunks']} чанков. Вопросы: `{report['evals']['path']}` — "
         f"{report['evals']['n_total']} (с ответом {report['evals']['n_positive']}, "
-        f"negative {report['evals']['n_negative']}).",
-        f"Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}, "
+        f"negative {report['evals']['n_negative']})" + _split_note(report) + ".",
+        f"Чанк до {report['config'].get('chunk_max_chars')} символов. Эмбеддинги: `{report['config']['embedding_model']}`, top-k {report['config']['top_k']}, "
         f"RRF k={report['config']['rrf_k']}, веса BM25/dense {report['config'].get('bm25_weight', 1.0)}"
         f"/{report['config'].get('dense_weight', 1.0)}.",
         "",
@@ -165,6 +206,21 @@ def render_markdown(report: dict) -> str:
             f"| {mode} | {m['n']} | {_fmt_pct(m['hit@1'])} | {_fmt_pct(m['hit@3'])} | "
             f"{_fmt_pct(m['hit@5'])} | {mrr} |"
         )
+    by_split = report["retrieval"].get("hybrid_by_split") or {}
+    if len(by_split) > 1:
+        lines += [
+            "",
+            "Гибрид по частям набора (настройки поиска подбирались только на dev, test отложен):",
+            "",
+            "| Часть | n | hit@1 | hit@3 | hit@5 | MRR@10 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name, m in by_split.items():
+            mrr = "—" if m["mrr@10"] is None else f"{m['mrr@10']:.3f}"
+            lines.append(
+                f"| {name} | {m['n']} | {_fmt_pct(m['hit@1'])} | {_fmt_pct(m['hit@3'])} | "
+                f"{_fmt_pct(m['hit@5'])} | {mrr} |"
+            )
     lines += ["", "## Ответы модели", ""]
     a = report["answers"]
     if a.get("status") in ("ok", "partial"):
@@ -207,6 +263,7 @@ def run(
     generator: Generator | None,
     max_usd: float,
     now: datetime | None = None,
+    split: str = "all",
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     meta = retriever.index.meta
@@ -225,6 +282,7 @@ def run(
         },
         "evals": {
             "path": evals_path,
+            "split": split,
             "n_total": len(items),
             "n_positive": len(items) - len(negatives),
             "n_negative": len(negatives),
@@ -260,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answers", action="store_true", help="also evaluate model answers (needs API key)")
     parser.add_argument("--max-usd", type=float, default=0.50, help="spend cap for one --answers run")
     parser.add_argument("--limit", type=int, default=None, help="only the first N questions")
+    parser.add_argument(
+        "--split", choices=SPLITS, default="all", help="dev (for tuning), test (held out) or all (default)"
+    )
     args = parser.parse_args(argv)
 
     index = Index.load(args.index)
@@ -273,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         bm25_weight=settings.bm25_weight,
         dense_weight=settings.dense_weight,
     )
-    items = load_evals(args.evals)[: args.limit]
+    items = select_split(load_evals(args.evals), args.split)[: args.limit]
 
     generator = None
     if args.answers:
@@ -292,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         answers=args.answers,
         generator=generator,
         max_usd=args.max_usd,
+        split=args.split,
     )
     for path in write_report(report, args.out):
         print(f"written {path}")
