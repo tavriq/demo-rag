@@ -29,7 +29,10 @@ def test_page_has_no_external_resources(make_client):
     resp = make_client().get("/")
     assert resp.status_code == 200
     html = resp.text
-    assert re.search(r'(src|href)="(https?:)?//', html) is None
+    assert re.search(r'src="(https?:)?//', html) is None
+    assert re.search(r'<link[^>]*href="(https?:)?//', html) is None
+    # внешние переходы — только на сайт автора
+    assert set(re.findall(r'<a [^>]*href="((?:https?:)?//[^/"]+)', html)) <= {"https://tavriq.ru"}
     assert 'src="/static/app.js"' in html
     assert "Content-Security-Policy" in resp.headers
     assert "script-src 'self'" in resp.headers["Content-Security-Policy"]
