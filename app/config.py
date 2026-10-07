@@ -15,7 +15,7 @@ from typing import Mapping
 
 # Any OpenAI-compatible /chat/completions gateway; the model name is the gateway's.
 DEFAULT_LLM_MODEL = "openai/gpt-5.6-terra"
-REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high")
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small@qint8"
 
 

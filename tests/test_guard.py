@@ -133,6 +133,7 @@ def test_token_settings_from_env():
                            "LLM_REASONING_EFFORT": "minimal"})
     assert s.daily_token_budget == 1000 and s.price_rub_per_1m_output == 480.0
     assert s.llm_temperature is None and s.llm_reasoning_effort == "minimal"
+    assert Settings.from_env({"LLM_REASONING_EFFORT": "none"}).llm_reasoning_effort == "none"
     with pytest.raises(ValueError):
         Settings.from_env({"LLM_REASONING_EFFORT": "maximal"})
 
